@@ -13,4 +13,4 @@ Without a lent pool, sections run serially, or on the current rayon pool for cod
 
 ## License
 
-AGPL-3.0-only
+MIT
