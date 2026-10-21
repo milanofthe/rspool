@@ -147,6 +147,22 @@ pub(crate) fn piece<R>(lent: Option<&Lent>, inner: usize, f: impl FnOnce() -> R)
     }
 }
 
+/// `f`, a piece of a section a library runs itself (a side of a `join`, a
+/// task of a `scope` on the lent pool or on rayon): counted as a piece on
+/// this thread, `lent` lent here if nothing is (it may run on a worker
+/// that is not the section's), and the sections it opens left `share`
+/// threads (`None`: what this thread has).
+pub fn as_piece<R>(lent: Option<&Lent>, share: Option<usize>, f: impl FnOnce() -> R) -> R {
+    let inner = share.unwrap_or_else(|| SHARE.with(|s| s.get()));
+    piece(lent, inner, f)
+}
+
+/// The threads the sections opened here may take of a pool of `threads`:
+/// all of them, or this thread's share of an enclosing section.
+pub fn share_of(threads: usize) -> usize {
+    share(threads)
+}
+
 /// `f` with `lent` lent on this thread, the share already set.
 fn install_inner<R>(lent: &Lent, f: impl FnOnce() -> R) -> R {
     struct Restore;

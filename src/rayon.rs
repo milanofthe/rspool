@@ -201,6 +201,16 @@ fn rayon_pieces(n: usize, k: usize, inner: usize, f: &Piece<'_>) {
     }
 }
 
+/// What a section costs on the current rayon pool, whatever is lent: for
+/// code that runs on rayon by itself even where a pool is lent.
+pub fn pool_dispatch() -> Dispatch {
+    let threads = ::rayon::current_num_threads();
+    if threads < 2 {
+        return kept(true, 1);
+    }
+    with_rayon(threads, Dispatch::clone)
+}
+
 /// The threads here: the lent pool's, or the current rayon pool's.
 pub fn threads() -> usize {
     Rayon::threads()
