@@ -2,7 +2,7 @@
 name = "rspool"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 authors = ["Milan Rother"]
 repository = "https://github.com/milanofthe/rspool"
 description = "One set of worker threads several libraries share, and sections that go as wide as their work is worth on them: measured section costs, learned rates."
