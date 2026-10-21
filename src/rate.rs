@@ -85,15 +85,20 @@ impl Rate {
             return;
         }
         let seen = (ns / ops) as f32;
-        let _ = self.ns.fetch_update(Relaxed, Relaxed, |b| {
-            let old = f32::from_bits(b);
+        let mut bits = self.ns.load(Relaxed);
+        loop {
+            let old = f32::from_bits(bits);
             let w = if seen < old {
                 RATE_WEIGHT_DOWN
             } else {
                 RATE_WEIGHT_UP
             };
-            Some((old + w * (seen - old)).to_bits())
-        });
+            let new = (old + w * (seen - old)).to_bits();
+            match self.ns.compare_exchange_weak(bits, new, Relaxed, Relaxed) {
+                Ok(_) => return,
+                Err(now) => bits = now,
+            }
+        }
     }
 
     /// `f`, a serial run of `ops` ops, measured if it is a probe or sampled.
