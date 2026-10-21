@@ -1,0 +1,23 @@
+[package]
+name = "rspool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Milan Rother"]
+repository = "https://github.com/milanofthe/rspool"
+description = "One set of worker threads several libraries share, and sections that go as wide as their work is worth on them: measured section costs, learned rates."
+keywords = ["parallel", "thread-pool", "scheduling", "work-stealing"]
+categories = ["concurrency"]
+
+[features]
+default = []
+# Sections on the current rayon pool where no pool is lent (`rspool::rayon`).
+rayon = ["dep:rayon"]
+
+[dependencies]
+rayon = { version = "1", optional = true }
+
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+neg_cmp_op_on_partial_ord = "allow"
