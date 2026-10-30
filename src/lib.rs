@@ -184,7 +184,12 @@ pub trait Place {
     /// What a section costs there.
     fn dispatch() -> Dispatch;
     /// The threads `work` ns of work in `pieces` pieces runs on there.
-    fn width(work: f64, pieces: usize) -> usize;
+    fn width(work: f64, pieces: usize) -> usize {
+        Self::width_after(work, pieces, 0.0)
+    }
+    /// [`width`](Self::width) for work that pays `extra` ns more on two
+    /// threads or more (its rate's surcharge, a hand-off into the pool).
+    fn width_after(work: f64, pieces: usize, extra: f64) -> usize;
     /// `f(i)` for `i` in `0..n` on `k` threads there (the calling one among
     /// them), serially for `k < 2`.
     fn run_width(n: usize, k: usize, f: &Piece<'_>);
@@ -206,14 +211,14 @@ impl Place for Here {
         })
     }
 
-    fn width(work: f64, pieces: usize) -> usize {
+    fn width_after(work: f64, pieces: usize, extra: f64) -> usize {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
         CURRENT.with(|c| {
             c.borrow().as_ref().map_or(1, |l| {
                 let cap = share(l.pool.threads());
-                l.dispatch.width(work, pieces).min(cap).max(1)
+                l.dispatch.width_after(work, pieces, extra).min(cap).max(1)
             })
         })
     }

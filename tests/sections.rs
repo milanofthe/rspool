@@ -203,3 +203,36 @@ fn rayon_sections_measure_the_pool_and_run_every_piece() {
         assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
     });
 }
+
+#[test]
+fn a_rate_learns_what_going_wide_costs_its_work_and_stays_serial() {
+    use rspool::{Go, Here, Work};
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        let r = Rate::new(1.0);
+        // the probes done: a microsecond of work, which a free pool takes wide
+        while r.probing(1.0) {
+            r.time(1.0, || {});
+        }
+        let work = Work::of(1e3, &r);
+        assert!(matches!(work.go::<Here>(64), Go::Wide(_)));
+        // its wide runs take a millisecond more than predicted
+        for _ in 0..400 {
+            if let Go::Wide(k) = work.go::<Here>(64) {
+                work.watch::<Here, _>(64, k, || {
+                    std::thread::sleep(std::time::Duration::from_millis(1))
+                });
+            }
+        }
+        assert!(r.surcharge() > 1e5, "{}", r.surcharge());
+        // now it stays serial, but for the odd retry
+        let wide = (0..1000)
+            .filter(|_| matches!(work.go::<Here>(64), Go::Wide(_)))
+            .count();
+        assert!(wide < 50, "{wide}");
+    });
+}

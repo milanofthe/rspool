@@ -60,14 +60,14 @@ impl Place for Rayon {
         with_rayon(threads, Dispatch::clone)
     }
 
-    fn width(work: f64, pieces: usize) -> usize {
+    fn width_after(work: f64, pieces: usize, extra: f64) -> usize {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
         let lent = crate::CURRENT.with(|c| {
             c.borrow().as_ref().map(|l| {
                 let cap = share(l.pool.threads());
-                l.dispatch.width(work, pieces).min(cap).max(1)
+                l.dispatch.width_after(work, pieces, extra).min(cap).max(1)
             })
         });
         if let Some(k) = lent {
@@ -78,7 +78,7 @@ impl Place for Rayon {
             return 1;
         }
         let cap = share(threads);
-        with_rayon(threads, |d| d.width(work, pieces))
+        with_rayon(threads, |d| d.width_after(work, pieces, extra))
             .min(cap)
             .max(1)
     }

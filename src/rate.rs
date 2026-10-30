@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use crate::constants::{
     RATE_EXPLORE, RATE_PROBES, RATE_SAMPLE_EVERY, RATE_STALE, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP,
+    SURCHARGE_WEIGHT_DOWN, SURCHARGE_WEIGHT_UP,
 };
 use crate::{Piece, Place};
 
@@ -20,15 +21,28 @@ use crate::{Piece, Place};
 /// and a wide run far faster than its rate predicts has the rate probe anew
 /// ([`Work::watch`]). A serial run inside which a section went wide (a call
 /// whose own work has wide sections) teaches nothing.
+///
+/// A rate also learns its surcharge: what a wide run of its work takes
+/// beyond its work over the threads and the pool's section cost, the output
+/// its pieces hand from core to core and the scratch they take, which the
+/// pool's calibration (pieces of a few cache lines) cannot know. The timed
+/// wide runs teach it, and a section decides on it on top of the section
+/// cost; one it keeps serial that would go wide without it goes wide now and
+/// then, timed, so that a surcharge that fell is seen to fall.
 #[derive(Debug)]
 pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: AtomicU32,
     /// Serial probes run.
     probes: AtomicU32,
+    /// ns a wide run takes beyond its prediction, as `f32` bits.
+    surcharge: AtomicU32,
 }
 
 thread_local! {
+    /// The next wide run this thread watches is a retry: timed whatever the
+    /// sampling draws ([`Work::go`]).
+    static RETRY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// This thread's dice for the sampling and the exploration: a draw per
     /// decision, so no counter is shared between the threads that run a
     /// rate's sections (a cache line every one of them would write), and no
@@ -54,6 +68,7 @@ impl Rate {
         Rate {
             ns: AtomicU32::new(prior.to_bits()),
             probes: AtomicU32::new(0),
+            surcharge: AtomicU32::new(0),
         }
     }
 
@@ -73,6 +88,42 @@ impl Rate {
     pub fn explore(&self, ops: f64, k: usize) -> bool {
         let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
         ops > 0.0 && one_in(every)
+    }
+
+    /// What a wide run of this work takes beyond its prediction, in ns.
+    pub fn surcharge(&self) -> f64 {
+        f32::from_bits(self.surcharge.load(Relaxed)) as f64
+    }
+
+    /// A timed wide run took `excess` ns beyond its prediction (negative
+    /// where it took less): the surcharge follows up at once
+    /// ([`SURCHARGE_WEIGHT_UP`]), down more slowly.
+    pub fn learn_surcharge(&self, excess: f64) {
+        let seen = excess.max(0.0) as f32;
+        let mut bits = self.surcharge.load(Relaxed);
+        loop {
+            let old = f32::from_bits(bits);
+            let w = if seen > old {
+                SURCHARGE_WEIGHT_UP
+            } else {
+                SURCHARGE_WEIGHT_DOWN
+            };
+            let new = (old + w * (seen - old)).to_bits();
+            match self
+                .surcharge
+                .compare_exchange_weak(bits, new, Relaxed, Relaxed)
+            {
+                Ok(_) => return,
+                Err(now) => bits = now,
+            }
+        }
+    }
+
+    /// Whether a run of `ops` ops its surcharge keeps serial, though it would
+    /// go `k` wide without it, is to go wide instead, timed: one in
+    /// [`RATE_EXPLORE`] times `k - 1`, drawn.
+    pub fn retry(&self, ops: f64, k: usize) -> bool {
+        self.explore(ops, k)
     }
 
     /// The rate is stale: its next runs probe again (warm, all counted).
@@ -185,6 +236,9 @@ pub struct Timing {
 pub struct Work<'r> {
     ops: f64,
     rate: Option<&'r Rate>,
+    /// The work in ns where it is not `ops` at the rate ([`estimated`](
+    /// Self::estimated)).
+    ns: Option<f64>,
 }
 
 /// How a section runs ([`Work::go`]).
@@ -205,6 +259,7 @@ impl<'r> Work<'r> {
         Work {
             ops: ns,
             rate: None,
+            ns: None,
         }
     }
 
@@ -213,30 +268,60 @@ impl<'r> Work<'r> {
         Work {
             ops,
             rate: Some(rate),
+            ns: None,
+        }
+    }
+
+    /// `ns` ns of work in `ops` ops, estimated by the caller (the calls of a
+    /// stage, each at its own rate), deciding with `rate`'s probes,
+    /// surcharge, exploration and retries. Its serial runs are the caller's
+    /// to measure, each part at its own rate.
+    pub fn estimated(ns: f64, ops: f64, rate: &'r Rate) -> Self {
+        Work {
+            ops,
+            rate: Some(rate),
+            ns: Some(ns),
         }
     }
 
     /// The work in ns.
     pub fn time(&self) -> f64 {
-        match self.rate {
-            Some(r) => self.ops * r.ns_per_op(),
-            None => self.ops,
+        match (self.ns, self.rate) {
+            (Some(ns), _) => ns,
+            (None, Some(r)) => self.ops * r.ns_per_op(),
+            (None, None) => self.ops,
         }
     }
 
     /// How the section runs in `pieces` pieces at the place `P`: serially
     /// while its rate probes, else on as many threads as it is worth there
-    /// ([`Place::width`]), now and then serially instead to keep the rate
-    /// the code's ([`Rate::explore`]).
+    /// with the rate's surcharge on top ([`Place::width_after`]), now and then
+    /// serially instead to keep the rate the code's ([`Rate::explore`]), and
+    /// now and then wide where only the surcharge keeps it serial
+    /// ([`Rate::retry`]; that run is timed).
     pub fn go<P: Place>(&self, pieces: usize) -> Go {
-        if self.rate.is_some_and(|r| r.probing(self.ops)) {
+        let Some(rate) = self.rate else {
+            return match P::width(self.time(), pieces) {
+                k if k >= 2 => Go::Wide(k),
+                _ => Go::Here,
+            };
+        };
+        if rate.probing(self.ops) {
             return Go::Here;
         }
-        let k = P::width(self.time(), pieces);
+        let extra = rate.surcharge();
+        let k = P::width_after(self.time(), pieces, extra);
         if k < 2 {
+            if extra > 0.0 {
+                let k0 = P::width(self.time(), pieces);
+                if k0 >= 2 && rate.retry(self.ops, k0) {
+                    RETRY.with(|r| r.set(true));
+                    return Go::Wide(k0);
+                }
+            }
             return Go::Here;
         }
-        if self.rate.is_some_and(|r| r.explore(self.ops, k)) {
+        if rate.explore(self.ops, k) {
             return Go::Explore;
         }
         Go::Wide(k)
@@ -259,16 +344,24 @@ impl<'r> Work<'r> {
     }
 
     /// `f`, the section run wide in `pieces` pieces on `k` threads at `P`:
-    /// timed when sampled, and far faster than its rate predicts
-    /// ([`RATE_STALE`]) it has the rate probe anew.
+    /// timed when sampled (always when [`go`](Self::go) made it a retry);
+    /// what it took beyond its prediction teaches the rate's surcharge, and
+    /// far faster than its rate predicts ([`RATE_STALE`]) it has the rate
+    /// probe anew.
     pub fn watch<P: Place, R>(&self, pieces: usize, k: usize, f: impl FnOnce() -> R) -> R {
-        let Some(rate) = self.rate.filter(|r| r.sample(self.ops)) else {
+        let retry = RETRY.with(|r| r.replace(false));
+        let Some(rate) = self.rate.filter(|r| retry || r.sample(self.ops)) else {
             return f();
         };
         let t = crate::clock::Instant::now();
         let r = f();
-        if stale::<P>(t.elapsed().as_nanos() as f64, self.time(), pieces, k) {
-            rate.reprobe();
+        let spent = t.elapsed().as_nanos() as f64;
+        if spent > 0.0 {
+            let predicted = predicted::<P>(self.time(), pieces, k);
+            rate.learn_surcharge(spent - predicted);
+            if spent < RATE_STALE * (predicted + rate.surcharge()) {
+                rate.reprobe();
+            }
         }
         r
     }
@@ -287,7 +380,12 @@ impl<'r> Work<'r> {
 /// took `spent` ns took less than [`RATE_STALE`] of the time predicted for
 /// it.
 pub(crate) fn stale<P: Place>(spent: f64, work: f64, pieces: usize, k: usize) -> bool {
+    spent > 0.0 && spent < RATE_STALE * predicted::<P>(work, pieces, k)
+}
+
+/// What `work` ns in `pieces` pieces on `k` threads of `P` should take: its
+/// share of the pieces and the pool's section cost.
+pub(crate) fn predicted<P: Place>(work: f64, pieces: usize, k: usize) -> f64 {
     let (p, k) = (pieces.max(1), k.clamp(1, pieces.max(1)));
-    let predicted = work * (p.div_ceil(k) as f64 / p as f64) + P::dispatch().cost(k);
-    spent > 0.0 && spent < RATE_STALE * predicted
+    work * (p.div_ceil(k) as f64 / p as f64) + P::dispatch().cost(k)
 }

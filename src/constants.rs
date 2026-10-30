@@ -66,6 +66,15 @@ pub const RATE_WEIGHT_DOWN: f32 = 0.5;
 /// See [`RATE_WEIGHT_DOWN`].
 pub const RATE_WEIGHT_UP: f32 = 0.1;
 
+/// The weight of a new measurement in a rate's surcharge, the time a wide
+/// run of its work took beyond what its work and the pool's section cost
+/// predict (the output its pieces hand over, the scratch they take): up at
+/// once, since a surcharge too low makes wide runs that lose, down more
+/// slowly ([`SURCHARGE_WEIGHT_DOWN`]).
+pub const SURCHARGE_WEIGHT_UP: f32 = 0.5;
+/// See [`SURCHARGE_WEIGHT_UP`].
+pub const SURCHARGE_WEIGHT_DOWN: f32 = 0.25;
+
 /// Pieces of work per thread a section of many items is cut into
 /// ([`piece_len`](crate::piece_len)): about four balance items of unequal
 /// cost, and a piece still carries enough work to pay for its hand-off.
