@@ -110,6 +110,14 @@ impl Dispatch {
     /// [`width`](Self::width) for a section that pays `extra` ns more on
     /// two threads or more (a hand-off into the pool it runs on).
     pub fn width_after(&self, work: f64, pieces: usize, extra: f64) -> usize {
+        self.width_with(work, pieces, extra, 0.0)
+    }
+
+    /// [`width_after`](Self::width_after) for a section that pays
+    /// `per_helper` ns more for every thread beyond the calling one (the
+    /// output each helper's pieces hand over): such a section goes as wide
+    /// as its surcharge leaves worth it, not only wide or not.
+    pub fn width_with(&self, work: f64, pieces: usize, extra: f64, per_helper: f64) -> usize {
         if !(work > 0.0) || pieces < 2 || work < self.least {
             return 1;
         }
@@ -120,7 +128,10 @@ impl Dispatch {
         let p = pieces as f64;
         let mut best = (1, work);
         for k in 2..=pieces.min(self.threads()) {
-            let t = work * pieces.div_ceil(k) as f64 / p + self.cost[k] + extra;
+            let t = work * pieces.div_ceil(k) as f64 / p
+                + self.cost[k]
+                + extra
+                + per_helper * (k - 1) as f64;
             if t < best.1 {
                 best = (k, t);
             }

@@ -22,20 +22,22 @@ use crate::{Piece, Place};
 /// ([`Work::watch`]). A serial run inside which a section went wide (a call
 /// whose own work has wide sections) teaches nothing.
 ///
-/// A rate also learns its surcharge: what a wide run of its work takes
-/// beyond its work over the threads and the pool's section cost, the output
-/// its pieces hand from core to core and the scratch they take, which the
-/// pool's calibration (pieces of a few cache lines) cannot know. The timed
-/// wide runs teach it, and a section decides on it on top of the section
-/// cost; one it keeps serial that would go wide without it goes wide now and
-/// then, timed, so that a surcharge that fell is seen to fall.
+/// A rate also learns its surcharge: what a wide run of its work takes per
+/// helper thread beyond its work over the threads and the pool's section
+/// cost, the output each helper's pieces hand from core to core and the
+/// scratch they take, which the pool's calibration (pieces of a few cache
+/// lines) cannot know. The timed wide runs teach it, and a section decides
+/// on it on top of the section cost, going as wide as it leaves worth it;
+/// one it keeps serial that would go wide without it goes wide now and then,
+/// timed, so that a surcharge that fell is seen to fall.
 #[derive(Debug)]
 pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: AtomicU32,
     /// Serial probes run.
     probes: AtomicU32,
-    /// ns a wide run takes beyond its prediction, as `f32` bits.
+    /// ns per helper thread a wide run takes beyond its prediction, as
+    /// `f32` bits.
     surcharge: AtomicU32,
 }
 
@@ -90,23 +92,24 @@ impl Rate {
         ops > 0.0 && one_in(every)
     }
 
-    /// What a wide run of this work takes beyond its prediction, in ns.
+    /// What a wide run of this work takes per helper thread beyond its
+    /// prediction, in ns.
     pub fn surcharge(&self) -> f64 {
         f32::from_bits(self.surcharge.load(Relaxed)) as f64
     }
 
-    /// A timed wide run took `excess` ns beyond its prediction (negative
-    /// where it took less): the surcharge follows up at once
-    /// ([`SURCHARGE_WEIGHT_UP`]), down more slowly.
-    pub fn learn_surcharge(&self, excess: f64) {
-        let seen = excess.max(0.0) as f32;
+    /// A timed wide run on `k` threads took `excess` ns beyond its
+    /// prediction (negative where it took less): the surcharge per helper
+    /// follows down at once ([`SURCHARGE_WEIGHT_DOWN`]), up only slowly.
+    pub fn learn_surcharge(&self, excess: f64, k: usize) {
+        let seen = (excess.max(0.0) / k.saturating_sub(1).max(1) as f64) as f32;
         let mut bits = self.surcharge.load(Relaxed);
         loop {
             let old = f32::from_bits(bits);
-            let w = if seen > old {
-                SURCHARGE_WEIGHT_UP
-            } else {
+            let w = if seen < old {
                 SURCHARGE_WEIGHT_DOWN
+            } else {
+                SURCHARGE_WEIGHT_UP
             };
             let new = (old + w * (seen - old)).to_bits();
             match self
@@ -358,8 +361,9 @@ impl<'r> Work<'r> {
         let spent = t.elapsed().as_nanos() as f64;
         if spent > 0.0 {
             let predicted = predicted::<P>(self.time(), pieces, k);
-            rate.learn_surcharge(spent - predicted);
-            if spent < RATE_STALE * (predicted + rate.surcharge()) {
+            rate.learn_surcharge(spent - predicted, k);
+            let helpers = k.saturating_sub(1) as f64;
+            if spent < RATE_STALE * (predicted + rate.surcharge() * helpers) {
                 rate.reprobe();
             }
         }
