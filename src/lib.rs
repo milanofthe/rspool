@@ -69,7 +69,7 @@ impl Lent {
 }
 
 thread_local! {
-    static CURRENT: RefCell<Option<Lent>> = const { RefCell::new(None) };
+    pub(crate) static CURRENT: RefCell<Option<Lent>> = const { RefCell::new(None) };
     /// The threads the sections this thread opens may take: its piece's
     /// share of an enclosing section (`0`: no section encloses it, the
     /// whole pool).

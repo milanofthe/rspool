@@ -53,16 +53,17 @@ fn a_rate_learns_what_an_op_costs() {
     assert!(r.ns_per_op() < 1.5, "{}", r.ns_per_op());
     // a run of no work is never sampled, any other now and then
     assert!(!(0..64).any(|_| r.sample(0.0)));
-    assert!((0..64).any(|_| r.sample(1.0)));
+    assert!((0..1000).any(|_| r.sample(1.0)));
 }
 
 #[test]
 fn a_wide_section_explores_whatever_the_serial_samples_counted() {
     let r = Rate::new(1.0);
-    // an odd number of serial samples first must not shift exploration off
-    // its multiples
+    // drawn, whatever the serial samples drew before: about one in
+    // RATE_EXPLORE on two threads
     r.sample(1.0);
-    assert!((0..1000).any(|_| r.explore(1.0, 2)));
+    let n = (0..100_000).filter(|_| r.explore(1.0, 2)).count();
+    assert!((500..2000).contains(&n), "{n}");
 }
 
 #[test]

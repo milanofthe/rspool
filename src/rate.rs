@@ -24,14 +24,28 @@ use crate::{Piece, Place};
 pub struct Rate {
     /// ns per op, as `f32` bits.
     ns: AtomicU32,
-    /// Runs counted for the sampling.
-    runs: AtomicU32,
-    /// Runs that would go wide, counted for the exploration: a count of its
-    /// own, so that the sampling's steps cannot keep it off the multiples it
-    /// explores at.
-    wide: AtomicU32,
     /// Serial probes run.
     probes: AtomicU32,
+}
+
+thread_local! {
+    /// This thread's dice for the sampling and the exploration: a draw per
+    /// decision, so no counter is shared between the threads that run a
+    /// rate's sections (a cache line every one of them would write), and no
+    /// rate's runs fall into step with another's.
+    static DICE: std::cell::Cell<u32> = const { std::cell::Cell::new(0x9E37_79B9) };
+}
+
+/// Whether this thread's next draw comes up one in `n`.
+fn one_in(n: u32) -> bool {
+    DICE.with(|d| {
+        let mut x = d.get();
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        d.set(x);
+        x.is_multiple_of(n.max(1))
+    })
 }
 
 impl Rate {
@@ -39,8 +53,6 @@ impl Rate {
     pub const fn new(prior: f32) -> Self {
         Rate {
             ns: AtomicU32::new(prior.to_bits()),
-            runs: AtomicU32::new(0),
-            wide: AtomicU32::new(0),
             probes: AtomicU32::new(0),
         }
     }
@@ -57,10 +69,10 @@ impl Rate {
     }
 
     /// Whether a run of `ops` ops that would go `k` wide is to run serially
-    /// instead, measured: one in [`RATE_EXPLORE`] times `k - 1`.
+    /// instead, measured: one in [`RATE_EXPLORE`] times `k - 1`, drawn.
     pub fn explore(&self, ops: f64, k: usize) -> bool {
         let every = RATE_EXPLORE.saturating_mul(k.saturating_sub(1).max(1) as u32);
-        ops > 0.0 && self.wide.fetch_add(1, Relaxed).is_multiple_of(every)
+        ops > 0.0 && one_in(every)
     }
 
     /// The rate is stale: its next runs probe again (warm, all counted).
@@ -68,13 +80,10 @@ impl Rate {
         self.probes.store(1, Relaxed);
     }
 
-    /// Whether to measure a run of `ops` ops: one in [`RATE_SAMPLE_EVERY`].
+    /// Whether to measure a run of `ops` ops: one in [`RATE_SAMPLE_EVERY`],
+    /// drawn.
     pub fn sample(&self, ops: f64) -> bool {
-        ops > 0.0
-            && self
-                .runs
-                .fetch_add(1, Relaxed)
-                .is_multiple_of(RATE_SAMPLE_EVERY)
+        ops > 0.0 && one_in(RATE_SAMPLE_EVERY)
     }
 
     /// A serial run of `ops` ops took `ns` ns: the running mean follows a

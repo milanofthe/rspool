@@ -64,9 +64,14 @@ impl Place for Rayon {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
-        if let Some(l) = current() {
-            let cap = share(l.pool.threads());
-            return l.dispatch.width(work, pieces).min(cap).max(1);
+        let lent = crate::CURRENT.with(|c| {
+            c.borrow().as_ref().map(|l| {
+                let cap = share(l.pool.threads());
+                l.dispatch.width(work, pieces).min(cap).max(1)
+            })
+        });
+        if let Some(k) = lent {
+            return k;
         }
         let threads = ::rayon::current_num_threads();
         if threads < 2 {
