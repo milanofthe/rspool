@@ -57,36 +57,6 @@ fn a_rate_learns_what_an_op_costs() {
 }
 
 #[test]
-fn a_wide_section_explores_whatever_the_serial_samples_counted() {
-    let r = Rate::new(1.0);
-    // drawn, whatever the serial samples drew before: about one in
-    // RATE_EXPLORE on two threads
-    r.sample(1.0);
-    let n = (0..100_000).filter(|_| r.explore(1.0, 2)).count();
-    assert!((500..2000).contains(&n), "{n}");
-}
-
-#[test]
-fn a_rate_probes_first_then_samples() {
-    let r = Rate::new(1e9);
-    let mut serial = 0;
-    for _ in 0..8 {
-        if r.probing(1.0) {
-            serial += 1;
-        }
-        r.time(1.0, || {
-            let t = std::time::Instant::now();
-            while t.elapsed() < std::time::Duration::from_micros(2) {
-                std::hint::spin_loop();
-            }
-        });
-    }
-    assert_eq!(serial, rspool::constants::RATE_PROBES as usize);
-    // the probes replaced the prior with what the runs took
-    assert!(r.ns_per_op() < 1e9);
-}
-
-#[test]
 fn nothing_is_lent_outside_install() {
     assert!(rspool::current().is_none());
     assert_eq!(rspool::threads(), 1);
@@ -205,34 +175,48 @@ fn rayon_sections_measure_the_pool_and_run_every_piece() {
 }
 
 #[test]
-fn a_rate_learns_what_going_wide_costs_its_work_and_stays_serial() {
+fn a_section_takes_the_width_its_runs_were_fastest_on() {
     use rspool::{Go, Here, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
     let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
     let lent = Lent {
         dispatch: Dispatch::free(4),
         pool: w,
     };
     rspool::install_lent(lent, || {
+        // a millisecond of work, which a free pool predicts four times
+        // faster on four threads
         let r = Rate::new(1.0);
-        // the probes done: a microsecond of work, which a free pool takes wide
-        while r.probing(1.0) {
-            r.time(1.0, || {});
-        }
-        let work = Work::of(1e3, &r);
-        assert!(matches!(work.go::<Here>(64), Go::Wide(_)));
-        // its wide runs take a millisecond more than predicted
-        for _ in 0..400 {
-            if let Go::Wide(k) = work.go::<Here>(64) {
-                work.watch::<Here, _>(64, k, || {
-                    std::thread::sleep(std::time::Duration::from_millis(1))
-                });
+        let work = Work::of(1e6, &r);
+        assert_eq!(work.go::<Here>(64), Go::Wide(4));
+        // but every wide run takes three milliseconds, a serial one one
+        for _ in 0..300 {
+            match work.go::<Here>(64) {
+                Go::Wide(k) => work.watch::<Here, _>(64, k, || sleep(3000)),
+                Go::Here => work.serial(|| sleep(1000)),
             }
         }
-        assert!(r.surcharge() > 1e5, "{}", r.surcharge());
-        // now it stays serial, but for the odd retry
+        // so it runs serially, but for the odd exploration of two threads
         let wide = (0..1000)
-            .filter(|_| matches!(work.go::<Here>(64), Go::Wide(_)))
+            .filter(|_| {
+                let go = work.go::<Here>(64);
+                // what it asked to be measured goes unmeasured here
+                work.serial(|| ());
+                go != Go::Here
+            })
             .count();
-        assert!(wide < 50, "{wide}");
+        assert!(wide < 60, "{wide}");
+    });
+}
+
+#[test]
+fn small_work_stays_serial_without_a_look_at_the_measurements() {
+    use rspool::{Go, Here, Work};
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    rspool::install(w.clone(), || {
+        let r = Rate::new(1.0);
+        // below what any section is worth on these workers
+        let tiny = Work::of(rspool::dispatch().break_even() * 0.5, &r);
+        assert!((0..1000).all(|_| tiny.go::<Here>(64) == Go::Here));
     });
 }

@@ -43,7 +43,7 @@ pub use clock::Instant;
 pub use constants::{GAIN, PIECES_PER_WORKER, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use rate::{Go, Rate, Timing, Work};
+pub use rate::{draw, Go, Rate, SerialRun, Timing, Work};
 pub use workers::Workers;
 
 /// `m` locked: a lock is poisoned only by a panic its section carries on.
@@ -183,13 +183,12 @@ pub trait Place {
     fn threads() -> usize;
     /// What a section costs there.
     fn dispatch() -> Dispatch;
-    /// The threads `work` ns of work in `pieces` pieces runs on there.
-    fn width(work: f64, pieces: usize) -> usize {
-        Self::width_after(work, pieces, 0.0)
-    }
-    /// [`width`](Self::width) for work that pays `per_helper` ns more for
-    /// every thread beyond the calling one (its rate's surcharge).
-    fn width_after(work: f64, pieces: usize, per_helper: f64) -> usize;
+    /// The threads a section opened here may take there: all of the
+    /// place's, or this thread's share of an enclosing section.
+    fn cap() -> usize;
+    /// The threads `work` ns of work in `pieces` pieces runs on there, by the
+    /// section cost alone.
+    fn width(work: f64, pieces: usize) -> usize;
     /// `f(i)` for `i` in `0..n` on `k` threads there (the calling one among
     /// them), serially for `k < 2`.
     fn run_width(n: usize, k: usize, f: &Piece<'_>);
@@ -211,17 +210,18 @@ impl Place for Here {
         })
     }
 
-    fn width_after(work: f64, pieces: usize, per_helper: f64) -> usize {
+    fn cap() -> usize {
+        CURRENT.with(|c| c.borrow().as_ref().map_or(1, |l| share(l.pool.threads())))
+    }
+
+    fn width(work: f64, pieces: usize) -> usize {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
         CURRENT.with(|c| {
             c.borrow().as_ref().map_or(1, |l| {
                 let cap = share(l.pool.threads());
-                l.dispatch
-                    .width_with(work, pieces, 0.0, per_helper)
-                    .min(cap)
-                    .max(1)
+                l.dispatch.width(work, pieces).min(cap).max(1)
             })
         })
     }
@@ -281,20 +281,6 @@ pub fn run(n: usize, work: f64, f: &Piece<'_>) {
 /// [`Rate`]).
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Here>(n, f)
-}
-
-/// [`run_width`] of `n` pieces of `work` ns on `k` threads, timed if
-/// `timed`: whether it took less than [`RATE_STALE`](constants::RATE_STALE)
-/// of the time predicted for it (the rates its work was estimated at are
-/// stale).
-pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &Piece<'_>) -> bool {
-    if !timed {
-        run_width(n, k, f);
-        return false;
-    }
-    let t = clock::Instant::now();
-    run_width(n, k, f);
-    rate::stale::<Here>(t.elapsed().as_nanos() as f64, work, n, k)
 }
 
 /// Items per piece for `n` items on `k` threads: about

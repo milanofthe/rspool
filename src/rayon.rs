@@ -60,17 +60,19 @@ impl Place for Rayon {
         with_rayon(threads, Dispatch::clone)
     }
 
-    fn width_after(work: f64, pieces: usize, per_helper: f64) -> usize {
+    fn cap() -> usize {
+        let lent = crate::CURRENT.with(|c| c.borrow().as_ref().map(|l| l.pool.threads()));
+        share(lent.unwrap_or_else(::rayon::current_num_threads)).max(1)
+    }
+
+    fn width(work: f64, pieces: usize) -> usize {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
         let lent = crate::CURRENT.with(|c| {
             c.borrow().as_ref().map(|l| {
                 let cap = share(l.pool.threads());
-                l.dispatch
-                    .width_with(work, pieces, 0.0, per_helper)
-                    .min(cap)
-                    .max(1)
+                l.dispatch.width(work, pieces).min(cap).max(1)
             })
         });
         if let Some(k) = lent {
@@ -81,7 +83,7 @@ impl Place for Rayon {
             return 1;
         }
         let cap = share(threads);
-        with_rayon(threads, |d| d.width_with(work, pieces, 0.0, per_helper))
+        with_rayon(threads, |d| d.width(work, pieces))
             .min(cap)
             .max(1)
     }
@@ -249,16 +251,4 @@ pub fn run(n: usize, work: f64, f: &Piece<'_>) {
 /// Run `n` pieces of `ops` ops at `rate`, the rate learning from the runs.
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Rayon>(n, f)
-}
-
-/// [`run_width`] timed if `timed`: whether it took less than
-/// [`RATE_STALE`](crate::constants::RATE_STALE) of its predicted time.
-pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &Piece<'_>) -> bool {
-    if !timed {
-        run_width(n, k, f);
-        return false;
-    }
-    let t = crate::clock::Instant::now();
-    run_width(n, k, f);
-    crate::rate::stale::<Rayon>(t.elapsed().as_nanos() as f64, work, n, k)
 }
