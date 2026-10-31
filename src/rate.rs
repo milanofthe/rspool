@@ -281,8 +281,11 @@ impl<'r> Work<'r> {
                 _ => Go::Here,
             };
         };
+        if cap < 2 || !(w > 0.0) {
+            return Go::Here;
+        }
         let d = P::dispatch();
-        if cap < 2 || !(w > 0.0) || w < d.break_even() {
+        if w < d.break_even() {
             return Go::Here;
         }
         let b = bin(w);

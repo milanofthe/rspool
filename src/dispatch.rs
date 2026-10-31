@@ -55,9 +55,11 @@ impl Dispatch {
         Dispatch::new(vec![0.0; threads.max(1) + 1])
     }
 
-    /// No section goes wide.
+    /// No section goes wide. Built once and shared: a decision where no
+    /// pool is lent allocates nothing.
     pub fn never() -> Self {
-        Dispatch::new(vec![0.0; 2])
+        static NEVER: std::sync::OnceLock<Dispatch> = std::sync::OnceLock::new();
+        NEVER.get_or_init(|| Dispatch::new(vec![0.0; 2])).clone()
     }
 
     /// What a pool of `threads` threads that measures nothing costs:
