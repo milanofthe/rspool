@@ -121,12 +121,7 @@ fn with_rayon<R>(threads: usize, f: impl FnOnce(&Dispatch) -> R) -> R {
 /// inside a piece of a section, where a measurement would time the
 /// section's own work.
 fn measured(threads: usize, inside: bool) -> Option<Dispatch> {
-    let find = |m: &[(usize, bool, Dispatch)]| {
-        m.iter()
-            .find(|(t, i, _)| *t == threads && *i == inside)
-            .map(|e| e.2.clone())
-    };
-    if let Some(d) = find(&lock(&MEASURED)) {
+    if let Some(d) = found(threads, inside) {
         return Some(d);
     }
     if crate::in_piece() {
@@ -138,11 +133,40 @@ fn measured(threads: usize, inside: bool) -> Option<Dispatch> {
         Dispatch::measure(threads, &|k, p| rayon_pieces(k, k, 1, p))
     });
     let mut m = lock(&MEASURED);
-    if let Some(d) = find(&m) {
+    if let Some(d) = in_list(&m, threads, inside) {
         return Some(d);
     }
     m.push((threads, inside, d.clone()));
     Some(d)
+}
+
+/// The section cost measured on a rayon pool of `threads` threads, from
+/// inside it or not, if anyone did.
+fn found(threads: usize, inside: bool) -> Option<Dispatch> {
+    in_list(&lock(&MEASURED), threads, inside)
+}
+
+fn in_list(m: &[(usize, bool, Dispatch)], threads: usize, inside: bool) -> Option<Dispatch> {
+    m.iter()
+        .find(|(t, i, _)| *t == threads && *i == inside)
+        .map(|e| e.2.clone())
+}
+
+/// What a section costs here as far as it is known, measuring nothing: the
+/// lent pool's, else the current rayon pool's as measured (assumed before).
+/// A measurement runs sections on the pool, which a caller asking on its way
+/// into another pool must not: a worker of a foreign pool would take that
+/// pool's own work while it waits.
+fn known() -> Dispatch {
+    if let Some(l) = current() {
+        return l.dispatch;
+    }
+    let threads = ::rayon::current_num_threads();
+    if threads < 2 {
+        return kept(true, 1);
+    }
+    found(threads, ::rayon::current_thread_index().is_some())
+        .unwrap_or_else(|| kept(false, threads))
 }
 
 /// Measure what a section costs on the current rayon pool now, if nobody
@@ -166,12 +190,8 @@ pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
     if current().is_some() || ::rayon::current_num_threads() == threads {
         return width(work, pieces).min(threads);
     }
-    let measured = lock(&MEASURED)
-        .iter()
-        .find(|(t, inside, _)| *t == threads && *inside)
-        .map(|e| e.2.clone());
-    let enter = dispatch().cost(2);
-    measured
+    let enter = known().cost(2);
+    found(threads, true)
         .unwrap_or_else(|| kept(false, threads))
         .width_after(work, pieces, enter)
         .min(threads)
