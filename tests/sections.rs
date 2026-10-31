@@ -200,8 +200,9 @@ fn a_section_takes_the_width_its_runs_were_fastest_on() {
         let wide = (0..1000)
             .filter(|_| {
                 let go = work.go::<Here>(64);
-                // what it asked to be measured goes unmeasured here
-                work.serial(|| ());
+                // what it asked to be measured goes unmeasured here: an
+                // empty run timed would teach the rate a far smaller one
+                let _ = work.serial_timed();
                 go != Go::Here
             })
             .count();
