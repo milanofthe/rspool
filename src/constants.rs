@@ -24,9 +24,13 @@ pub const ASSUMED_HELPER_NS: f64 = 1_000.0;
 
 /// Sections timed per thread count when a pool's section cost is measured
 /// ([`Dispatch::measure`](crate::Dispatch::measure), the median taken),
-/// after as many to wake the workers: a stable median, about a millisecond
-/// per thread count.
-pub const CALIBRATION_ROUNDS: usize = 64;
+/// after as many to wake the workers. More rounds do not make it steadier:
+/// on 12 Linux cores, 20 pools of 12 workers each, the median cost of a
+/// section on all of them was 16.0, 18.8, 17.6 and 16.0 us for 8, 16, 32
+/// and 64 rounds, from pool to pool a factor of two to four apart at any
+/// of them, while building a pool took 1.2, 2.3, 4.1 and 7.3 ms. The cost
+/// is a prior: the widths a section takes are measured on its runs.
+pub const CALIBRATION_ROUNDS: usize = 16;
 /// How long each piece of a calibration section is busy, in ns: long
 /// enough for an awake pool's threads to take their pieces before the
 /// caller has run them all (a work-stealing pool runs a piece nobody took
