@@ -136,8 +136,11 @@ impl Dispatch {
 
     /// What a section costs on a pool of `threads` threads, measured:
     /// `run(k, piece)` runs `piece(i)` for `i` in `0..k` on `k` threads.
-    /// Per thread count the median of [`CALIBRATION_ROUNDS`] sections of as
-    /// many pieces, each writing [`CALIBRATION_LINES`] cache lines (the
+    /// Measured on two, four, eight, ... threads and on all of them, in
+    /// between interpolated: what a section costs grows with its helpers
+    /// about in proportion, and a pool of many threads is measured in a
+    /// few steps. Per thread count measured the median of
+    /// [`CALIBRATION_ROUNDS`] sections of as many pieces, each writing [`CALIBRATION_LINES`] cache lines (the
     /// hand-over of a piece's output a real section pays) and then busy for
     /// [`CALIBRATION_PIECE_NS`], less what one piece costs alone; never less
     /// than with fewer threads. A piece lasts long enough for the pool's
@@ -181,9 +184,16 @@ impl Dispatch {
         }
         let one = median(&|| piece(0));
         let mut cost = vec![0.0; threads + 1];
-        for k in 2..=threads {
-            let c = median(&|| run(k, &piece)) - one;
-            cost[k] = c.max(cost[k - 1]);
+        let (mut lo, mut k) = (1, 2);
+        loop {
+            let c = (median(&|| run(k, &piece)) - one).max(cost[lo]);
+            for j in lo + 1..=k {
+                cost[j] = cost[lo] + (c - cost[lo]) * (j - lo) as f64 / (k - lo) as f64;
+            }
+            if k == threads {
+                break;
+            }
+            (lo, k) = (k, (2 * k).min(threads));
         }
         Dispatch::new(cost)
     }
