@@ -1,5 +1,6 @@
-//! What an op of some work costs, and how wide a section of it runs best,
-//! both measured on the runs.
+//! What an op of some work costs, how wide a section of it runs best, and
+//! which of a library's ways to run some work is fastest: all measured on
+//! the runs.
 
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -17,25 +18,127 @@ use crate::{Piece, Place};
 /// ops at that cost. A serial run inside which a section went wide (a call
 /// whose own work has wide sections) does not teach it.
 ///
-/// How wide a section runs is chosen from what its runs took: per width
-/// (an arm: 1, 2, 4, ... threads up to what is free here) and per size of
-/// the work (bins a factor [`TUNE_BIN_FACTOR`] apart from
-/// [`TUNE_BIN_BASE_NS`]) the measured time per op. A section takes the arm
-/// that was fastest for work of its size, an arm not yet measured counted at
-/// what the pool's section cost predicts for it. Now and then (one in
-/// [`TUNE_EXPLORE`]) it takes a neighbouring arm instead, measured, so that
-/// a change in the code (a body specialized, compiled) or in the machine is
-/// followed. Whatever a wide run pays beyond the work over its threads (the
-/// output its pieces hand from core to core, the memory bandwidth they
-/// share, the scratch they take), the measurement holds; nothing of it has
-/// to be modelled.
+/// How wide a section runs is a [`Choice`] among widths (1, 2, 4, ...
+/// threads up to what is free here), an arm not yet measured counted at what
+/// the pool's section cost predicts for it. Whatever a wide run pays beyond
+/// the work over its threads (the output its pieces hand from core to core,
+/// the memory bandwidth they share, the scratch they take), the measurement
+/// holds; nothing of it has to be modelled.
 #[derive(Debug)]
 pub struct Rate {
     /// ns per op of serial runs, as `f32` bits.
     ns: AtomicU32,
-    /// ns per op a run of a size bin took on an arm, as `f32` bits; zero
-    /// where none was measured.
+    /// The widths, arm `a` on `2^a` threads (the last one on all free).
+    widths: Choice,
+}
+
+/// Which of up to [`TUNE_ARMS`] ways to run some work is fastest, from what
+/// its runs took: per way (an option) and per size of the work (bins a
+/// factor [`TUNE_BIN_FACTOR`] apart from [`TUNE_BIN_BASE_NS`]) the measured
+/// time per op. A run takes the option that was fastest for work of its
+/// size, an option not yet measured counted at what the caller predicts for
+/// it. Now and then (one in [`TUNE_EXPLORE`]) it takes a neighbouring option
+/// instead, measured, so that a change in the code or in the machine is
+/// followed; besides, one in [`RATE_SAMPLE_EVERY`] runs is measured.
+///
+/// The per-region choice the literature tunes online (feedback-driven
+/// threading, Suleman et al. 2008; Otter, SCALO): for the width of a section
+/// ([`Rate`]), and for whatever else a library chooses between, how a solver
+/// replays a block of its factorization, say.
+#[derive(Debug)]
+pub struct Choice {
+    /// ns per op a run of a size bin took with an option, as `f32` bits;
+    /// zero where none was measured.
     cells: [[AtomicU32; TUNE_ARMS]; TUNE_BINS],
+}
+
+/// What [`Choice::pick`] chose: the option, and whether (for which size
+/// bin) its run is to be measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pick {
+    /// The option chosen.
+    pub option: usize,
+    bin: usize,
+    measure: bool,
+}
+
+impl Pick {
+    /// Whether the run is to be measured ([`Choice::record`]).
+    pub fn measured(&self) -> bool {
+        self.measure
+    }
+}
+
+impl Choice {
+    /// No option measured yet.
+    pub const fn new() -> Self {
+        Choice {
+            cells: [const { [const { AtomicU32::new(0) }; TUNE_ARMS] }; TUNE_BINS],
+        }
+    }
+
+    /// Among the options `0..n` (at most [`TUNE_ARMS`]) for `ops` ops of
+    /// `work` ns: the one whose measured time, or where none is measured
+    /// `predicted(option)` in ns, is least; now and then a neighbour.
+    pub fn pick(&self, work: f64, ops: f64, n: usize, predicted: impl Fn(usize) -> f64) -> Pick {
+        let n = n.clamp(1, TUNE_ARMS);
+        let b = bin(work);
+        let est = |o: usize| match self.cell(b, o) {
+            Some(per_op) => per_op * ops,
+            None => predicted(o),
+        };
+        let mut best = 0;
+        for o in 1..n {
+            if est(o) < est(best) {
+                best = o;
+            }
+        }
+        let mut option = best;
+        let explore = n > 1 && one_in(TUNE_EXPLORE);
+        if explore {
+            let down = best > 0 && (best + 1 >= n || one_in(2));
+            option = if down { best - 1 } else { best + 1 };
+        }
+        let measure =
+            explore || self.cell(b, option).is_none() || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
+        Pick {
+            option,
+            bin: b,
+            measure,
+        }
+    }
+
+    /// The run of `pick`, `ops` ops, took `ns` ns.
+    pub fn record(&self, pick: Pick, ns: f64, ops: f64) {
+        if ns > 0.0 && ops > 0.0 {
+            let cell = &self.cells[pick.bin.min(TUNE_BINS - 1)][pick.option.min(TUNE_ARMS - 1)];
+            update(cell, (ns / ops) as f32, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP);
+        }
+    }
+
+    /// A pick of `option` for work of `work` ns, measured: for a run made
+    /// without one.
+    fn at(work: f64, option: usize) -> Pick {
+        Pick {
+            option,
+            bin: bin(work),
+            measure: true,
+        }
+    }
+
+    /// The measured ns per op of `option` for size bin `b`, if any.
+    fn cell(&self, b: usize, option: usize) -> Option<f64> {
+        let v = f32::from_bits(
+            self.cells[b.min(TUNE_BINS - 1)][option.min(TUNE_ARMS - 1)].load(Relaxed),
+        );
+        (v > 0.0).then_some(v as f64)
+    }
+}
+
+impl Default for Choice {
+    fn default() -> Self {
+        Choice::new()
+    }
 }
 
 thread_local! {
@@ -45,8 +148,8 @@ thread_local! {
     /// rate's runs fall into step with another's.
     static DICE: std::cell::Cell<u32> = const { std::cell::Cell::new(0x9E37_79B9) };
     /// The run this thread is about to make is to be measured: for which
-    /// rate (its address), size bin and arm ([`Work::go`]).
-    static NEXT: std::cell::Cell<Option<(usize, usize, usize)>> = const { std::cell::Cell::new(None) };
+    /// rate (its address), and as which pick ([`Work::go`]).
+    static NEXT: std::cell::Cell<Option<(usize, Pick)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether this thread's next draw comes up one in `n`: per-thread dice,
@@ -109,7 +212,7 @@ impl Rate {
     pub const fn new(prior: f32) -> Self {
         Rate {
             ns: AtomicU32::new(prior.to_bits()),
-            cells: [const { [const { AtomicU32::new(0) }; TUNE_ARMS] }; TUNE_BINS],
+            widths: Choice::new(),
         }
     }
 
@@ -173,21 +276,6 @@ impl Rate {
         let ns = t.start.elapsed().as_nanos() as f64;
         if crate::wide_count() == t.wide {
             self.learn(ns, ops);
-        }
-    }
-
-    /// The measured ns per op of arm `a` for size bin `b`, if any.
-    fn cell(&self, b: usize, a: usize) -> Option<f64> {
-        let v =
-            f32::from_bits(self.cells[b.min(TUNE_BINS - 1)][a.min(TUNE_ARMS - 1)].load(Relaxed));
-        (v > 0.0).then_some(v as f64)
-    }
-
-    /// A run of `ops` ops of size bin `b` on arm `a` took `ns` ns.
-    fn record(&self, b: usize, a: usize, ns: f64, ops: f64) {
-        if ns > 0.0 && ops > 0.0 {
-            let cell = &self.cells[b.min(TUNE_BINS - 1)][a.min(TUNE_ARMS - 1)];
-            update(cell, (ns / ops) as f32, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP);
         }
     }
 
@@ -288,7 +376,6 @@ impl<'r> Work<'r> {
         if w < d.break_even() {
             return Go::Here;
         }
-        let b = bin(w);
         let p = pieces as f64;
         let predicted = |k: usize| {
             if k < 2 {
@@ -308,37 +395,22 @@ impl<'r> Work<'r> {
                 break;
             }
         }
-        let est = |a: usize| match rate.cell(b, a) {
-            Some(per_op) => per_op * self.ops,
-            None => predicted(arms[a]),
-        };
-        let mut best = 0;
-        for a in 1..n {
-            if est(a) < est(best) {
-                best = a;
-            }
+        let pick = rate.widths.pick(w, self.ops, n, |a| predicted(arms[a]));
+        if pick.measure {
+            NEXT.with(|c| c.set(Some((rate.key(), pick))));
         }
-        let mut chosen = best;
-        let explore = n > 1 && one_in(TUNE_EXPLORE);
-        if explore {
-            let down = best > 0 && (best + 1 >= n || one_in(2));
-            chosen = if down { best - 1 } else { best + 1 };
-        }
-        if explore || rate.cell(b, chosen).is_none() || rate.sample(self.ops) {
-            NEXT.with(|c| c.set(Some((rate.key(), b, chosen))));
-        }
-        match arms[chosen] {
+        match arms[pick.option] {
             k if k >= 2 => Go::Wide(k),
             _ => Go::Here,
         }
     }
 
     /// The measurement [`go`](Self::go) asked of the run it decided, if it
-    /// was for this work's rate: its size bin and arm.
-    fn take_next(&self) -> Option<(usize, usize)> {
+    /// was for this work's rate.
+    fn take_next(&self) -> Option<Pick> {
         let rate = self.rate?;
         let next = NEXT.with(|c| c.take())?;
-        (next.0 == rate.key()).then_some((next.1, next.2))
+        (next.0 == rate.key()).then_some(next.1)
     }
 
     /// `f`, the section run on this thread as [`go`](Self::go) decided:
@@ -360,7 +432,8 @@ impl<'r> Work<'r> {
             if self.ns.is_none() {
                 rate.learn(ns, self.ops);
             }
-            rate.record(next.map_or(bin(self.time()), |n| n.0), 0, ns, self.ops);
+            let pick = next.map_or(Choice::at(self.time(), 0), |n| Pick { option: 0, ..n });
+            rate.widths.record(pick, ns, self.ops);
         }
         r
     }
@@ -372,7 +445,7 @@ impl<'r> Work<'r> {
     pub fn serial_timed(&self) -> Option<SerialRun> {
         let next = self.take_next()?;
         Some(SerialRun {
-            bin: next.0,
+            pick: Pick { option: 0, ..next },
             wide: crate::wide_count(),
             start: crate::clock::Instant::now(),
         })
@@ -382,7 +455,7 @@ impl<'r> Work<'r> {
     pub fn record_serial(&self, t: SerialRun) {
         let ns = t.start.elapsed().as_nanos() as f64;
         if let Some(rate) = self.rate.filter(|_| crate::wide_count() == t.wide) {
-            rate.record(t.bin, 0, ns, self.ops);
+            rate.widths.record(t.pick, ns, self.ops);
         }
     }
 
@@ -401,14 +474,14 @@ impl<'r> Work<'r> {
             return f();
         };
         let next = self.take_next();
-        let b = next.map_or(bin(self.time()), |n| n.0);
         if next.is_none() && !rate.sample(self.ops) {
             return f();
         }
         let t = crate::clock::Instant::now();
         let r = f();
-        let a = next.map_or(arm_of(k), |n| n.1);
-        rate.record(b, a, t.elapsed().as_nanos() as f64, self.ops);
+        let pick = next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k)));
+        rate.widths
+            .record(pick, t.elapsed().as_nanos() as f64, self.ops);
         r
     }
 
@@ -425,7 +498,7 @@ impl<'r> Work<'r> {
 /// A serial run measured as a whole by its caller ([`Work::serial_timed`]).
 #[derive(Debug)]
 pub struct SerialRun {
-    bin: usize,
+    pick: Pick,
     wide: u64,
     start: crate::clock::Instant,
 }

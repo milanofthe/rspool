@@ -221,3 +221,30 @@ fn small_work_stays_serial_without_a_look_at_the_measurements() {
         assert!((0..1000).all(|_| tiny.go::<Here>(64) == Go::Here));
     });
 }
+
+#[test]
+fn a_choice_takes_the_option_its_runs_were_fastest_with() {
+    use rspool::Choice;
+    let c = Choice::new();
+    // predicted: option 2 fastest; measured: option 0 takes 1 ns an op,
+    // the others 4
+    let predicted = |o: usize| [3e3, 2e3, 1e3][o];
+    let took = |o: usize| if o == 0 { 1e3 } else { 4e3 };
+    for _ in 0..300 {
+        let p = c.pick(1e3, 1e3, 3, predicted);
+        if p.measured() {
+            c.record(p, took(p.option), 1e3);
+        }
+    }
+    let other = (0..1000)
+        .filter(|_| c.pick(1e3, 1e3, 3, predicted).option != 0)
+        .count();
+    // the odd exploration of option 1 only
+    assert!(other < 60, "{other}");
+    // work of another size is its own: there the prediction still decides
+    let predicted_large = |o: usize| [3e6, 2e6, 1e6][o];
+    let two = (0..100)
+        .filter(|_| c.pick(1e6, 1e6, 3, predicted_large).option == 2)
+        .count();
+    assert!(two > 90, "{two}");
+}
