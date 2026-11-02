@@ -228,7 +228,7 @@ fn a_choice_takes_the_option_its_runs_were_fastest_with() {
     let c = Choice::new();
     // predicted: option 2 fastest; measured: option 0 takes 1 ns an op,
     // the others 4
-    let predicted = |o: usize| [3e3, 2e3, 1e3][o];
+    let predicted = |o: usize| Some([3e3, 2e3, 1e3][o]);
     let took = |o: usize| if o == 0 { 1e3 } else { 4e3 };
     for _ in 0..300 {
         let p = c.pick(1e3, 1e3, 3, predicted);
@@ -242,9 +242,13 @@ fn a_choice_takes_the_option_its_runs_were_fastest_with() {
     // the odd exploration of option 1 only
     assert!(other < 60, "{other}");
     // work of another size is its own: there the prediction still decides
-    let predicted_large = |o: usize| [3e6, 2e6, 1e6][o];
+    let predicted_large = |o: usize| Some([3e6, 2e6, 1e6][o]);
     let two = (0..100)
         .filter(|_| c.pick(1e6, 1e6, 3, predicted_large).option == 2)
         .count();
     assert!(two > 90, "{two}");
+    // an option not available here is never taken, whatever was measured
+    // for it: option 0 measured fastest above, offered without it
+    let without = |o: usize| (o != 0).then(|| [3e3, 2e3, 4e3][o]);
+    assert!((0..1000).all(|_| c.pick(1e3, 1e3, 3, without).option != 0));
 }

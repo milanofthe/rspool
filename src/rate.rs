@@ -78,27 +78,55 @@ impl Choice {
     }
 
     /// Among the options `0..n` (at most [`TUNE_ARMS`]) for `ops` ops of
-    /// `work` ns: the one whose measured time, or where none is measured
-    /// `predicted(option)` in ns, is least; now and then a neighbour.
-    pub fn pick(&self, work: f64, ops: f64, n: usize, predicted: impl Fn(usize) -> f64) -> Pick {
+    /// `work` ns: of those available here (`predicted(option)` is some, its
+    /// time in ns), the one whose measured time, or where none is measured
+    /// the predicted, is least; now and then the next available one below
+    /// or above it. An option keeps its number wherever it is offered, so
+    /// what was measured for it is its own; option 0 where none is
+    /// available.
+    pub fn pick(
+        &self,
+        work: f64,
+        ops: f64,
+        n: usize,
+        predicted: impl Fn(usize) -> Option<f64>,
+    ) -> Pick {
         let n = n.clamp(1, TUNE_ARMS);
         let b = bin(work);
-        let est = |o: usize| match self.cell(b, o) {
-            Some(per_op) => per_op * ops,
-            None => predicted(o),
-        };
-        let mut best = 0;
-        for o in 1..n {
-            if est(o) < est(best) {
-                best = o;
+        let mut times = [None; TUNE_ARMS];
+        for (o, t) in times.iter_mut().enumerate().take(n) {
+            *t = predicted(o).map(|p| self.cell(b, o).map_or(p, |per_op| per_op * ops));
+        }
+        // the options available here, in order
+        let mut open = [0usize; TUNE_ARMS];
+        let mut m = 0;
+        for (o, t) in times.iter().enumerate().take(n) {
+            if t.is_some() {
+                open[m] = o;
+                m += 1;
             }
         }
-        let mut option = best;
-        let explore = n > 1 && one_in(TUNE_EXPLORE);
-        if explore {
-            let down = best > 0 && (best + 1 >= n || one_in(2));
-            option = if down { best - 1 } else { best + 1 };
+        if m == 0 {
+            return Pick {
+                option: 0,
+                bin: b,
+                measure: false,
+            };
         }
+        let time = |i: usize| times[open[i]].unwrap_or(f64::INFINITY);
+        let mut best = 0;
+        for i in 1..m {
+            if time(i) < time(best) {
+                best = i;
+            }
+        }
+        let mut at = best;
+        let explore = m > 1 && one_in(TUNE_EXPLORE);
+        if explore {
+            let down = best > 0 && (best + 1 >= m || one_in(2));
+            at = if down { best - 1 } else { best + 1 };
+        }
+        let option = open[at];
         let measure =
             explore || self.cell(b, option).is_none() || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
         Pick {
@@ -395,7 +423,9 @@ impl<'r> Work<'r> {
                 break;
             }
         }
-        let pick = rate.widths.pick(w, self.ops, n, |a| predicted(arms[a]));
+        let pick = rate
+            .widths
+            .pick(w, self.ops, n, |a| Some(predicted(arms[a])));
         if pick.measure {
             NEXT.with(|c| c.set(Some((rate.key(), pick))));
         }
