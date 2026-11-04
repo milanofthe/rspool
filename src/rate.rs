@@ -2,7 +2,7 @@
 //! which of a library's ways to run some work is fastest: all measured on
 //! the runs.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
 
 use crate::constants::{
     RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
@@ -48,7 +48,9 @@ pub struct Rate {
 /// in [`TUNE_EXPLORE`]) a run takes, measured, the option nearest to the
 /// fastest whose least time could beat it, so that a change in the code or
 /// in the machine is followed, and never one that could not; besides, one
-/// in [`RATE_SAMPLE_EVERY`] runs is measured.
+/// in [`RATE_SAMPLE_EVERY`] runs is measured. The first run of a way is a
+/// warm-up (cold caches, first-touched scratch): it counts at no more than
+/// what was expected, and the way's next run replaces it.
 ///
 /// The per-region choice the literature tunes online (feedback-driven
 /// threading, Suleman et al. 2008; Otter, SCALO): for the width of a section
@@ -59,6 +61,9 @@ pub struct Choice {
     /// ns per op a run of a size bin took with an option, as `f32` bits;
     /// zero where none was measured.
     cells: [[AtomicU32; TUNE_ARMS]; TUNE_BINS],
+    /// The runs measured per cell, up to two: the first warms the way up
+    /// (its code, its caches, its scratch) and is replaced by the second.
+    runs: [[AtomicU8; TUNE_ARMS]; TUNE_BINS],
 }
 
 /// What a caller predicts for an option of a [`Choice`] its runs have not
@@ -108,6 +113,7 @@ impl Choice {
     pub const fn new() -> Self {
         Choice {
             cells: [const { [const { AtomicU32::new(0) }; TUNE_ARMS] }; TUNE_BINS],
+            runs: [const { [const { AtomicU8::new(0) }; TUNE_ARMS] }; TUNE_BINS],
         }
     }
 
@@ -163,7 +169,12 @@ impl Choice {
         let mut best = None;
         for o in 0..n {
             if let Some(p) = prior[o] {
-                time[o] = seen[o].unwrap_or_else(|| p.expected * error(o));
+                let expected = || p.expected * error(o);
+                time[o] = match seen[o] {
+                    Some(t) if self.warming(b, o) => t.min(expected()),
+                    Some(t) => t,
+                    None => expected(),
+                };
                 if best.is_none_or(|q: usize| time[o] < time[q]) {
                     best = Some(o);
                 }
@@ -192,8 +203,10 @@ impl Choice {
             })
         });
         let option = explore.flatten().unwrap_or(best);
-        let measure =
-            option != best || seen[option].is_none() || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
+        let measure = option != best
+            || seen[option].is_none()
+            || self.warming(b, option)
+            || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
         Pick {
             option,
             bin: b,
@@ -204,9 +217,21 @@ impl Choice {
     /// The run of `pick`, `ops` ops, took `ns` ns.
     pub fn record(&self, pick: Pick, ns: f64, ops: f64) {
         if ns > 0.0 && ops > 0.0 {
-            let cell = &self.cells[pick.bin.min(TUNE_BINS - 1)][pick.option.min(TUNE_ARMS - 1)];
-            update(cell, (ns / ops) as f32, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP);
+            let (b, o) = (pick.bin.min(TUNE_BINS - 1), pick.option.min(TUNE_ARMS - 1));
+            let seen = (ns / ops) as f32;
+            let runs = self.runs[b][o]
+                .fetch_update(Relaxed, Relaxed, |r| Some(r.saturating_add(1).min(2)));
+            match runs.unwrap_or(2) {
+                // the first run, and the one that replaces it
+                0 | 1 => self.cells[b][o].store(seen.to_bits(), Relaxed),
+                _ => update(&self.cells[b][o], seen, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP),
+            }
         }
+    }
+
+    /// Whether option `o` of size bin `b` has only its warm-up run measured.
+    fn warming(&self, b: usize, o: usize) -> bool {
+        self.runs[b.min(TUNE_BINS - 1)][o.min(TUNE_ARMS - 1)].load(Relaxed) == 1
     }
 
     /// A pick of `option` for work of `work` ns, measured: for a run made

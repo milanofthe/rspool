@@ -302,6 +302,33 @@ fn a_model_off_on_one_way_is_taken_off_as_much_on_the_next() {
 }
 
 #[test]
+fn a_cold_first_run_does_not_rule_a_way_out() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // option 1 is expected and is twice as fast as option 0, but its first
+    // run (cold) takes three times its time
+    let predicted = |o: usize| Some(Prior::exactly([2e3, 1e3][o]));
+    let mut first = true;
+    let mut ones = 0;
+    for _ in 0..20 {
+        let p = c.pick(2e3, 1e3, 2, predicted);
+        let took = match p.option {
+            0 => 2e3,
+            _ if first => {
+                first = false;
+                3e3
+            }
+            _ => 1e3,
+        };
+        ones += usize::from(p.option == 1);
+        if p.measured() {
+            c.record(p, took, 1e3);
+        }
+    }
+    assert!(ones > 15, "{ones}");
+}
+
+#[test]
 fn a_choice_never_explores_an_option_that_cannot_win() {
     use rspool::{Choice, Prior};
     let c = Choice::new();
