@@ -43,21 +43,28 @@ pub fn kept(free: bool, threads: usize) -> Dispatch {
 
 impl Place for Rayon {
     fn threads() -> usize {
-        match current() {
-            Some(l) => l.pool.threads().max(1),
-            None => ::rayon::current_num_threads().max(1),
-        }
+        crate::CURRENT
+            .with(|c| c.borrow().as_ref().map(|l| l.pool.threads()))
+            .unwrap_or_else(::rayon::current_num_threads)
+            .max(1)
     }
 
-    fn dispatch() -> Dispatch {
-        if let Some(l) = current() {
-            return l.dispatch;
+    fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R {
+        let mut f = Some(f);
+        let lent = crate::CURRENT.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|l| (f.take().expect("called once"))(&l.dispatch))
+        });
+        if let Some(r) = lent {
+            return r;
         }
+        let f = f.take().expect("not called while lent");
         let threads = ::rayon::current_num_threads();
         if threads < 2 {
-            return kept(true, 1);
+            return f(Dispatch::never_ref());
         }
-        with_rayon(threads, Dispatch::clone)
+        with_rayon(threads, f)
     }
 
     fn cap() -> usize {
@@ -233,7 +240,7 @@ pub fn threads() -> usize {
 /// What a section costs here: on the lent pool, or on the current rayon
 /// pool (measured on its first use).
 pub fn dispatch() -> Dispatch {
-    Rayon::dispatch()
+    Rayon::with_dispatch(Dispatch::clone)
 }
 
 /// The threads `work` ns of work in `pieces` pieces runs on here.

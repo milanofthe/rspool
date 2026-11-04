@@ -8,7 +8,7 @@ use crate::constants::{
     RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
     TUNE_BIN_FACTOR, TUNE_EXPLORE, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP,
 };
-use crate::{Piece, Place};
+use crate::{Dispatch, Piece, Place};
 
 /// What an op of some kind of work costs, and how long a section of it took
 /// on each width it ran on.
@@ -400,7 +400,16 @@ impl<'r> Work<'r> {
         if cap < 2 || !(w > 0.0) {
             return Go::Here;
         }
-        let d = P::dispatch();
+        // the section cost borrowed, not cloned: a decision is made on every
+        // thread at once, and a shared count taken and given back per
+        // decision cost them tens of ns each per thread there was
+        P::with_dispatch(|d| self.decide(rate, d, w, pieces, cap))
+    }
+
+    /// [`go`](Self::go) for work worth a decision: the width among those up
+    /// to `cap` its runs of its size were fastest on, on a place whose
+    /// sections cost `d`.
+    fn decide(&self, rate: &Rate, d: &Dispatch, w: f64, pieces: usize, cap: usize) -> Go {
         if w < d.break_even() {
             return Go::Here;
         }

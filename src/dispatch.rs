@@ -58,8 +58,13 @@ impl Dispatch {
     /// No section goes wide. Built once and shared: a decision where no
     /// pool is lent allocates nothing.
     pub fn never() -> Self {
+        Dispatch::never_ref().clone()
+    }
+
+    /// [`never`](Self::never), borrowed.
+    pub(crate) fn never_ref() -> &'static Dispatch {
         static NEVER: std::sync::OnceLock<Dispatch> = std::sync::OnceLock::new();
-        NEVER.get_or_init(|| Dispatch::new(vec![0.0; 2])).clone()
+        NEVER.get_or_init(|| Dispatch::new(vec![0.0; 2]))
     }
 
     /// What a pool of `threads` threads that measures nothing costs:
