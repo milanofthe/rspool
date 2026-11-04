@@ -64,7 +64,7 @@ pub struct Choice {
 /// What a caller predicts for an option of a [`Choice`] its runs have not
 /// measured: the time it expects, and the least the option can take (a
 /// bound: an option whose least is above the fastest's time is never
-/// explored). For a schedule of work `T1` on `k` threads with a longest
+/// explored; zero where nothing bounds it). For a schedule of work `T1` on `k` threads with a longest
 /// dependency chain `Tinf`, Brent's bounds: `T1 / k + Tinf` expected (any
 /// greedy schedule), `max(T1 / k, Tinf)` least.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -324,12 +324,16 @@ impl Rate {
         ops > 0.0 && one_in(RATE_SAMPLE_EVERY)
     }
 
-    /// A serial run of `ops` ops took `ns` ns: the running mean follows a
-    /// faster run at once ([`RATE_WEIGHT_DOWN`]), a slower one only as they
-    /// keep coming ([`RATE_WEIGHT_UP`]).
+    /// A serial run of `ops` ops took `ns` ns: the first replaces the
+    /// prior, then the running mean follows a faster run at once
+    /// ([`RATE_WEIGHT_DOWN`]), a slower one only as they keep coming
+    /// ([`RATE_WEIGHT_UP`]).
     pub fn learn(&self, ns: f64, ops: f64) {
         if ns > 0.0 && ops > 0.0 {
-            self.learned.store(true, Relaxed);
+            if !self.learned.swap(true, Relaxed) {
+                self.ns.store(((ns / ops) as f32).to_bits(), Relaxed);
+                return;
+            }
             update(
                 &self.ns,
                 (ns / ops) as f32,

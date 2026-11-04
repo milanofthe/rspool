@@ -45,6 +45,9 @@ fn a_rate_learns_what_an_op_costs() {
     let r = Rate::new(10.0);
     assert_eq!(r.ns_per_op(), 10.0);
     assert!(!r.learned());
+    // the first run replaces the prior
+    r.learn(2e4, 1e4);
+    assert_eq!(r.ns_per_op(), 2.0);
     for _ in 0..64 {
         r.learn(1e4, 1e4);
     }
