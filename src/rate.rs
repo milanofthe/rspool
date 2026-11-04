@@ -64,7 +64,8 @@ pub struct Choice {
 /// What a caller predicts for an option of a [`Choice`] its runs have not
 /// measured: the time it expects, and the least the option can take (a
 /// bound: an option whose least is above the fastest's time is never
-/// explored; zero where nothing bounds it). For a schedule of work `T1` on `k` threads with a longest
+/// explored; zero where nothing bounds it). An option not expected to be
+/// run at all (expected infinite) is only ever explored. For a schedule of work `T1` on `k` threads with a longest
 /// dependency chain `Tinf`, Brent's bounds: `T1 / k + Tinf` expected (any
 /// greedy schedule), `max(T1 / k, Tinf)` least.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +140,9 @@ impl Choice {
         // none is measured, and for the reference itself
         let error = |o: usize| {
             let off = |q: usize| match (seen[q], prior[q]) {
-                (Some(t), Some(p)) if q > 0 && p.expected > 0.0 => Some(t / p.expected),
+                (Some(t), Some(p)) if q > 0 && p.expected > 0.0 && p.expected.is_finite() => {
+                    Some(t / p.expected)
+                }
                 _ => None,
             };
             if o == 0 {
