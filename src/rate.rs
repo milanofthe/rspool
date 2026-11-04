@@ -2,7 +2,7 @@
 //! which of a library's ways to run some work is fastest: all measured on
 //! the runs.
 
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 
 use crate::constants::{
     RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
@@ -28,6 +28,8 @@ use crate::{Dispatch, Piece, Place};
 pub struct Rate {
     /// ns per op of serial runs, as `f32` bits.
     ns: AtomicU32,
+    /// Whether a serial run was measured: `ns` is no longer the prior.
+    learned: AtomicBool,
     /// The widths, arm `a` on `2^a` threads (the last one on all free).
     widths: Choice,
 }
@@ -300,6 +302,7 @@ impl Rate {
     pub const fn new(prior: f32) -> Self {
         Rate {
             ns: AtomicU32::new(prior.to_bits()),
+            learned: AtomicBool::new(false),
             widths: Choice::new(),
         }
     }
@@ -307,6 +310,12 @@ impl Rate {
     /// ns per op.
     pub fn ns_per_op(&self) -> f64 {
         f32::from_bits(self.ns.load(Relaxed)) as f64
+    }
+
+    /// Whether a serial run was measured: until then the cost of an op is
+    /// the prior.
+    pub fn learned(&self) -> bool {
+        self.learned.load(Relaxed)
     }
 
     /// Whether to measure a serial run of `ops` ops: one in
@@ -320,6 +329,7 @@ impl Rate {
     /// keep coming ([`RATE_WEIGHT_UP`]).
     pub fn learn(&self, ns: f64, ops: f64) {
         if ns > 0.0 && ops > 0.0 {
+            self.learned.store(true, Relaxed);
             update(
                 &self.ns,
                 (ns / ops) as f32,

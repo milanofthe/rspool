@@ -44,10 +44,12 @@ fn workers_measure_what_a_section_costs_them() {
 fn a_rate_learns_what_an_op_costs() {
     let r = Rate::new(10.0);
     assert_eq!(r.ns_per_op(), 10.0);
+    assert!(!r.learned());
     for _ in 0..64 {
         r.learn(1e4, 1e4);
     }
     assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
+    assert!(r.learned());
     // a slower run moves it less than a faster one
     r.learn(2e4, 1e4);
     assert!(r.ns_per_op() < 1.5, "{}", r.ns_per_op());
