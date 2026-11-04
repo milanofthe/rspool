@@ -24,9 +24,13 @@ pub const ASSUMED_HELPER_NS: f64 = 1_000.0;
 
 /// Sections timed per thread count when a pool's section cost is measured
 /// ([`Dispatch::measure`](crate::Dispatch::measure), the median taken),
-/// after as many to wake the workers: a stable median, about a millisecond
-/// per thread count.
-pub const CALIBRATION_ROUNDS: usize = 64;
+/// after as many to wake the workers. More rounds do not make it steadier:
+/// on 12 Linux cores, 20 pools of 12 workers each, the median cost of a
+/// section on all of them was 16.0, 18.8, 17.6 and 16.0 us for 8, 16, 32
+/// and 64 rounds, from pool to pool a factor of two to four apart at any
+/// of them, while building a pool took 1.2, 2.3, 4.1 and 7.3 ms. The cost
+/// is a prior: the widths a section takes are measured on its runs.
+pub const CALIBRATION_ROUNDS: usize = 16;
 /// How long each piece of a calibration section is busy, in ns: long
 /// enough for an awake pool's threads to take their pieces before the
 /// caller has run them all (a work-stealing pool runs a piece nobody took
@@ -38,26 +42,10 @@ pub const CALIBRATION_PIECE_NS: u64 = 5_000;
 /// queue's.
 pub const CALIBRATION_LINES: usize = 8;
 
-/// A [`Rate`](crate::Rate) measures one in this many of its serial runs:
-/// two clock reads, a few ns a run on average even for the smallest
-/// sections, whose rate decides as much as a large one's.
+/// A [`Rate`](crate::Rate) measures one in this many of its runs: two
+/// clock reads, a few ns a run on average even for the smallest sections,
+/// whose rate decides as much as a large one's.
 pub const RATE_SAMPLE_EVERY: u32 = 16;
-/// The first runs of a [`Rate`](crate::Rate)'s sections run serially and
-/// are measured, the first of them (cold caches) not counted: the rate a
-/// section's width is decided on comes from runs on one thread, never from
-/// wide ones, whose time mixes the work with what the hand-off cost; a rate
-/// learned from them would keep its sections wide or serial whatever the
-/// work.
-pub const RATE_PROBES: u32 = 4;
-/// A wide run (one in [`RATE_SAMPLE_EVERY`] is timed) that takes less than
-/// this fraction of the time its rate predicts shows the rate stale (the
-/// code got cheaper since: a body specialized or compiled, warm caches):
-/// the rate probes anew.
-pub const RATE_STALE: f64 = 0.5;
-/// A section that would run on `k` threads runs serially, measured, once
-/// in this many times `k - 1` runs: its rate stays the code's as it is now,
-/// for about a percent of the section's time.
-pub const RATE_EXPLORE: u32 = 100;
 /// The weight of a new measurement in a rate's running mean toward less
 /// time: interruptions only ever add time to a run, so the mean follows a
 /// faster run at once and a slower one only as they keep coming
@@ -65,6 +53,29 @@ pub const RATE_EXPLORE: u32 = 100;
 pub const RATE_WEIGHT_DOWN: f32 = 0.5;
 /// See [`RATE_WEIGHT_DOWN`].
 pub const RATE_WEIGHT_UP: f32 = 0.1;
+
+/// The sizes a [`Rate`](crate::Rate) keeps its measured widths apart for:
+/// bins of work this factor apart, the first from this many ns. A small
+/// section pays a wide run's fixed costs on less work than a large one of
+/// the same kind, so each size learns its own best width.
+pub const TUNE_BIN_FACTOR: f64 = 4.0;
+/// See [`TUNE_BIN_FACTOR`].
+pub const TUNE_BIN_BASE_NS: f64 = 250.0;
+/// See [`TUNE_BIN_FACTOR`]: 250 ns to about a minute.
+pub const TUNE_BINS: usize = 14;
+/// The widths a [`Rate`](crate::Rate) measures: 1, 2, 4, ... threads, this
+/// many, the last capped at what is free (up to 128 threads apart).
+pub const TUNE_ARMS: usize = 8;
+/// One in this many sections runs on a neighbouring width instead of the
+/// best measured one, measured: a change in the code or the machine is
+/// followed, for a percent or two of the time.
+pub const TUNE_EXPLORE: u32 = 64;
+/// The weight of a new measurement in a width's time per op toward less
+/// time and toward more: interruptions only ever add time, so a faster run
+/// counts at once and slower ones as they keep coming.
+pub const TUNE_WEIGHT_DOWN: f32 = 0.5;
+/// See [`TUNE_WEIGHT_DOWN`].
+pub const TUNE_WEIGHT_UP: f32 = 0.25;
 
 /// Pieces of work per thread a section of many items is cut into
 /// ([`piece_len`](crate::piece_len)): about four balance items of unequal

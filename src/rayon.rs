@@ -43,30 +43,47 @@ pub fn kept(free: bool, threads: usize) -> Dispatch {
 
 impl Place for Rayon {
     fn threads() -> usize {
-        match current() {
-            Some(l) => l.pool.threads().max(1),
-            None => ::rayon::current_num_threads().max(1),
-        }
+        crate::CURRENT
+            .with(|c| c.borrow().as_ref().map(|l| l.pool.threads()))
+            .unwrap_or_else(::rayon::current_num_threads)
+            .max(1)
     }
 
-    fn dispatch() -> Dispatch {
-        if let Some(l) = current() {
-            return l.dispatch;
+    fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R {
+        let mut f = Some(f);
+        let lent = crate::CURRENT.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|l| (f.take().expect("called once"))(&l.dispatch))
+        });
+        if let Some(r) = lent {
+            return r;
         }
+        let f = f.take().expect("not called while lent");
         let threads = ::rayon::current_num_threads();
         if threads < 2 {
-            return kept(true, 1);
+            return f(Dispatch::never_ref());
         }
-        with_rayon(threads, Dispatch::clone)
+        with_rayon(threads, f)
+    }
+
+    fn cap() -> usize {
+        let lent = crate::CURRENT.with(|c| c.borrow().as_ref().map(|l| l.pool.threads()));
+        share(lent.unwrap_or_else(::rayon::current_num_threads)).max(1)
     }
 
     fn width(work: f64, pieces: usize) -> usize {
         if pieces < 2 || !(work > 0.0) {
             return 1;
         }
-        if let Some(l) = current() {
-            let cap = share(l.pool.threads());
-            return l.dispatch.width(work, pieces).min(cap).max(1);
+        let lent = crate::CURRENT.with(|c| {
+            c.borrow().as_ref().map(|l| {
+                let cap = share(l.pool.threads());
+                l.dispatch.width(work, pieces).min(cap).max(1)
+            })
+        });
+        if let Some(k) = lent {
+            return k;
         }
         let threads = ::rayon::current_num_threads();
         if threads < 2 {
@@ -111,12 +128,7 @@ fn with_rayon<R>(threads: usize, f: impl FnOnce(&Dispatch) -> R) -> R {
 /// inside a piece of a section, where a measurement would time the
 /// section's own work.
 fn measured(threads: usize, inside: bool) -> Option<Dispatch> {
-    let find = |m: &[(usize, bool, Dispatch)]| {
-        m.iter()
-            .find(|(t, i, _)| *t == threads && *i == inside)
-            .map(|e| e.2.clone())
-    };
-    if let Some(d) = find(&lock(&MEASURED)) {
+    if let Some(d) = found(threads, inside) {
         return Some(d);
     }
     if crate::in_piece() {
@@ -128,11 +140,23 @@ fn measured(threads: usize, inside: bool) -> Option<Dispatch> {
         Dispatch::measure(threads, &|k, p| rayon_pieces(k, k, 1, p))
     });
     let mut m = lock(&MEASURED);
-    if let Some(d) = find(&m) {
+    if let Some(d) = in_list(&m, threads, inside) {
         return Some(d);
     }
     m.push((threads, inside, d.clone()));
     Some(d)
+}
+
+/// The section cost measured on a rayon pool of `threads` threads, from
+/// inside it or not, if anyone did.
+fn found(threads: usize, inside: bool) -> Option<Dispatch> {
+    in_list(&lock(&MEASURED), threads, inside)
+}
+
+fn in_list(m: &[(usize, bool, Dispatch)], threads: usize, inside: bool) -> Option<Dispatch> {
+    m.iter()
+        .find(|(t, i, _)| *t == threads && *i == inside)
+        .map(|e| e.2.clone())
 }
 
 /// Measure what a section costs on the current rayon pool now, if nobody
@@ -148,7 +172,11 @@ pub fn prepare() {
 /// `threads` threads the caller is about to enter: as [`width`] where that
 /// pool is the lent one or the current rayon pool, else as a rayon pool of
 /// as many threads measured when one was last used from its workers
-/// (assumed before), the section into it from here paid on top.
+/// (assumed before), entering it paid on top: a piece handed to one of its
+/// workers, what a section of two costs there. Nothing is measured: a
+/// measurement runs sections on a pool, which a caller on its way into
+/// another must not (a worker of a foreign pool would take that pool's own
+/// work while it waits).
 pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
     if threads < 2 || pieces < 2 || !(work > 0.0) {
         return 1;
@@ -156,15 +184,8 @@ pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
     if current().is_some() || ::rayon::current_num_threads() == threads {
         return width(work, pieces).min(threads);
     }
-    let measured = lock(&MEASURED)
-        .iter()
-        .find(|(t, inside, _)| *t == threads && *inside)
-        .map(|e| e.2.clone());
-    let enter = dispatch().cost(2);
-    measured
-        .unwrap_or_else(|| kept(false, threads))
-        .width_after(work, pieces, enter)
-        .min(threads)
+    let there = found(threads, true).unwrap_or_else(|| kept(false, threads));
+    there.width_after(work, pieces, there.cost(2)).min(threads)
 }
 
 /// `f(i)` for `i` in `0..n` on `k` threads of the current rayon pool.
@@ -175,10 +196,16 @@ fn rayon_run(n: usize, k: usize, f: &Piece<'_>) {
         return (0..n).for_each(f);
     }
     crate::WIDE.with(|w| w.set(w.get() + 1));
-    rayon_pieces(n, k, (cap / k).max(1), f)
+    // Its pieces leave their sections the whole pool: rayon runs a nested
+    // section's pieces only on threads that are free, so nothing is
+    // oversubscribed, and a share would keep the threads a short piece
+    // leaves behind from a long one's sections (a factorization's lookahead
+    // ran its update on half the pool, 10 to 20 % slower on four threads).
+    rayon_pieces(n, k, 0, f)
 }
 
-/// The pieces of a rayon section, each with its share `inner`.
+/// The pieces of a rayon section, each leaving its sections the share
+/// `inner` (0: the whole pool).
 fn rayon_pieces(n: usize, k: usize, inner: usize, f: &Piece<'_>) {
     use ::rayon::prelude::*;
     let lent: Option<&Lent> = None;
@@ -219,7 +246,7 @@ pub fn threads() -> usize {
 /// What a section costs here: on the lent pool, or on the current rayon
 /// pool (measured on its first use).
 pub fn dispatch() -> Dispatch {
-    Rayon::dispatch()
+    Rayon::with_dispatch(Dispatch::clone)
 }
 
 /// The threads `work` ns of work in `pieces` pieces runs on here.
@@ -241,16 +268,4 @@ pub fn run(n: usize, work: f64, f: &Piece<'_>) {
 /// Run `n` pieces of `ops` ops at `rate`, the rate learning from the runs.
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Rayon>(n, f)
-}
-
-/// [`run_width`] timed if `timed`: whether it took less than
-/// [`RATE_STALE`](crate::constants::RATE_STALE) of its predicted time.
-pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &Piece<'_>) -> bool {
-    if !timed {
-        run_width(n, k, f);
-        return false;
-    }
-    let t = crate::clock::Instant::now();
-    run_width(n, k, f);
-    crate::rate::stale::<Rayon>(t.elapsed().as_nanos() as f64, work, n, k)
 }

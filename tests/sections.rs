@@ -44,45 +44,21 @@ fn workers_measure_what_a_section_costs_them() {
 fn a_rate_learns_what_an_op_costs() {
     let r = Rate::new(10.0);
     assert_eq!(r.ns_per_op(), 10.0);
+    assert!(!r.learned());
+    // the first run replaces the prior
+    r.learn(2e4, 1e4);
+    assert_eq!(r.ns_per_op(), 2.0);
     for _ in 0..64 {
         r.learn(1e4, 1e4);
     }
     assert!((r.ns_per_op() - 1.0).abs() < 1e-3, "{}", r.ns_per_op());
+    assert!(r.learned());
     // a slower run moves it less than a faster one
     r.learn(2e4, 1e4);
     assert!(r.ns_per_op() < 1.5, "{}", r.ns_per_op());
     // a run of no work is never sampled, any other now and then
     assert!(!(0..64).any(|_| r.sample(0.0)));
-    assert!((0..64).any(|_| r.sample(1.0)));
-}
-
-#[test]
-fn a_wide_section_explores_whatever_the_serial_samples_counted() {
-    let r = Rate::new(1.0);
-    // an odd number of serial samples first must not shift exploration off
-    // its multiples
-    r.sample(1.0);
-    assert!((0..1000).any(|_| r.explore(1.0, 2)));
-}
-
-#[test]
-fn a_rate_probes_first_then_samples() {
-    let r = Rate::new(1e9);
-    let mut serial = 0;
-    for _ in 0..8 {
-        if r.probing(1.0) {
-            serial += 1;
-        }
-        r.time(1.0, || {
-            let t = std::time::Instant::now();
-            while t.elapsed() < std::time::Duration::from_micros(2) {
-                std::hint::spin_loop();
-            }
-        });
-    }
-    assert_eq!(serial, rspool::constants::RATE_PROBES as usize);
-    // the probes replaced the prior with what the runs took
-    assert!(r.ns_per_op() < 1e9);
+    assert!((0..1000).any(|_| r.sample(1.0)));
 }
 
 #[test]
@@ -201,4 +177,194 @@ fn rayon_sections_measure_the_pool_and_run_every_piece() {
         });
         assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 1));
     });
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn a_rayon_piece_leaves_its_sections_the_whole_pool() {
+    // rayon runs nested pieces on free threads only: a piece of a section
+    // two wide still opens its sections on all four
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let inner = AtomicUsize::new(0);
+        rspool::rayon::run_width(2, 2, &|_| {
+            inner.fetch_max(rspool::rayon::width(f64::INFINITY, 100), Ordering::Relaxed);
+        });
+        assert_eq!(inner.into_inner(), 4);
+    });
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn a_caller_on_one_thread_enters_a_wider_pool_for_work_worth_it() {
+    // from a pool of one thread, as a solve under a policy of its own
+    // threads is asked from: a second of work is worth the wider pool, a
+    // nanosecond is not
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    one.install(|| {
+        assert!(rspool::rayon::width_on(4, 1e9, 64) > 1);
+        assert_eq!(rspool::rayon::width_on(4, 1.0, 64), 1);
+    });
+}
+
+#[test]
+fn a_section_takes_the_width_its_runs_were_fastest_on() {
+    use rspool::{Go, Here, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        // a millisecond of work, which a free pool predicts four times
+        // faster on four threads
+        let r = Rate::new(1.0);
+        let work = Work::of(1e6, &r);
+        assert_eq!(work.go::<Here>(64), Go::Wide(4));
+        // but every wide run takes three milliseconds, a serial one one
+        for _ in 0..300 {
+            match work.go::<Here>(64) {
+                Go::Wide(k) => work.watch::<Here, _>(64, k, || sleep(3000)),
+                Go::Here => work.serial(|| sleep(1000)),
+            }
+        }
+        // so it runs serially, but for the odd exploration of two threads
+        let wide = (0..1000)
+            .filter(|_| {
+                let go = work.go::<Here>(64);
+                // what it asked to be measured goes unmeasured here: an
+                // empty run timed would teach the rate a far smaller one
+                let _ = work.serial_timed();
+                go != Go::Here
+            })
+            .count();
+        assert!(wide < 60, "{wide}");
+    });
+}
+
+#[test]
+fn small_work_stays_serial_without_a_look_at_the_measurements() {
+    use rspool::{Go, Here, Work};
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    rspool::install(w.clone(), || {
+        let r = Rate::new(1.0);
+        // below what any section is worth on these workers
+        let tiny = Work::of(rspool::dispatch().break_even() * 0.5, &r);
+        assert!((0..1000).all(|_| tiny.go::<Here>(64) == Go::Here));
+    });
+}
+
+#[test]
+fn a_choice_takes_the_option_its_runs_were_fastest_with() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // expected: option 2 fastest; measured: option 0 takes 1 ns an op,
+    // the others 4
+    let predicted = |o: usize| Some(Prior::exactly([3e3, 2e3, 1e3][o]));
+    let took = |o: usize| if o == 0 { 1e3 } else { 4e3 };
+    for _ in 0..300 {
+        let p = c.pick(1e3, 1e3, 3, predicted);
+        if p.measured() {
+            c.record(p, took(p.option), 1e3);
+        }
+    }
+    let other = (0..1000)
+        .filter(|_| c.pick(1e3, 1e3, 3, predicted).option != 0)
+        .count();
+    // the odd exploration of an option that could beat it only
+    assert!(other < 60, "{other}");
+    // work of another size is its own: there the prediction still decides
+    let predicted_large = |o: usize| Some(Prior::exactly([3e6, 2e6, 1e6][o]));
+    let two = (0..100)
+        .filter(|_| c.pick(1e6, 1e6, 3, predicted_large).option == 2)
+        .count();
+    assert!(two > 90, "{two}");
+    // an option not available here is never taken, whatever was measured
+    // for it: option 0 measured fastest above, offered without it
+    let without = |o: usize| (o != 0).then(|| Prior::exactly([3e3, 2e3, 4e3][o]));
+    assert!((0..1000).all(|_| c.pick(1e3, 1e3, 3, without).option != 0));
+}
+
+#[test]
+fn a_model_off_on_one_way_is_taken_off_as_much_on_the_next() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // expected: the wider the faster; every wide way takes four times what
+    // was expected of it, so after the widest only the narrow one is run
+    let predicted = |o: usize| Some(Prior::exactly([4e3, 1.5e3, 1.2e3, 1e3][o]));
+    let took = |o: usize| {
+        if o == 0 {
+            4e3
+        } else {
+            4.0 * [4e3, 1.5e3, 1.2e3, 1e3][o]
+        }
+    };
+    let mut tried = std::collections::BTreeSet::new();
+    for _ in 0..20 {
+        let p = c.pick(4e3, 4e3, 4, predicted);
+        tried.insert(p.option);
+        if p.measured() {
+            c.record(p, took(p.option), 4e3);
+        }
+    }
+    // the widest was tried, its error then kept the next ones off
+    assert!(tried.contains(&3), "{tried:?}");
+    assert!(!tried.contains(&2), "{tried:?}");
+}
+
+#[test]
+fn a_cold_first_run_does_not_rule_a_way_out() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // option 1 is expected and is twice as fast as option 0, but its first
+    // run (cold) takes three times its time
+    let predicted = |o: usize| Some(Prior::exactly([2e3, 1e3][o]));
+    let mut first = true;
+    let mut ones = 0;
+    for _ in 0..20 {
+        let p = c.pick(2e3, 1e3, 2, predicted);
+        let took = match p.option {
+            0 => 2e3,
+            _ if first => {
+                first = false;
+                3e3
+            }
+            _ => 1e3,
+        };
+        ones += usize::from(p.option == 1);
+        if p.measured() {
+            c.record(p, took, 1e3);
+        }
+    }
+    assert!(ones > 15, "{ones}");
+}
+
+#[test]
+fn a_choice_never_explores_an_option_that_cannot_win() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // option 1 can take no less than twice option 0's time
+    let predicted = |o: usize| {
+        Some(match o {
+            0 => Prior::exactly(1e3),
+            _ => Prior {
+                expected: 3e3,
+                least: 2e3,
+            },
+        })
+    };
+    for _ in 0..2000 {
+        let p = c.pick(1e3, 1e3, 2, predicted);
+        assert_eq!(p.option, 0);
+        if p.measured() {
+            c.record(p, 1e3, 1e3);
+        }
+    }
 }

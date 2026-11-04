@@ -43,7 +43,7 @@ pub use clock::Instant;
 pub use constants::{GAIN, PIECES_PER_WORKER, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use rate::{Go, Rate, Timing, Work};
+pub use rate::{draw, Choice, Go, Pick, Prior, Rate, SerialRun, Timing, Work};
 pub use workers::Workers;
 
 /// `m` locked: a lock is poisoned only by a panic its section carries on.
@@ -69,7 +69,7 @@ impl Lent {
 }
 
 thread_local! {
-    static CURRENT: RefCell<Option<Lent>> = const { RefCell::new(None) };
+    pub(crate) static CURRENT: RefCell<Option<Lent>> = const { RefCell::new(None) };
     /// The threads the sections this thread opens may take: its piece's
     /// share of an enclosing section (`0`: no section encloses it, the
     /// whole pool).
@@ -108,6 +108,11 @@ pub fn install_lent<R>(lent: Lent, f: impl FnOnce() -> R) -> R {
 /// What is lent on this thread.
 pub fn current() -> Option<Lent> {
     CURRENT.with(|c| c.borrow().clone())
+}
+
+/// Whether a pool is lent on this thread (nothing taken or cloned).
+pub fn is_lent() -> bool {
+    CURRENT.with(|c| c.borrow().is_some())
 }
 
 /// The sections this thread sent wide so far.
@@ -181,9 +186,13 @@ fn install_inner<R>(lent: &Lent, f: impl FnOnce() -> R) -> R {
 pub trait Place {
     /// The threads of the place.
     fn threads() -> usize;
-    /// What a section costs there.
-    fn dispatch() -> Dispatch;
-    /// The threads `work` ns of work in `pieces` pieces runs on there.
+    /// `f` of what a section costs there, borrowed.
+    fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R;
+    /// The threads a section opened here may take there: all of the
+    /// place's, or this thread's share of an enclosing section.
+    fn cap() -> usize;
+    /// The threads `work` ns of work in `pieces` pieces runs on there, by the
+    /// section cost alone.
     fn width(work: f64, pieces: usize) -> usize;
     /// `f(i)` for `i` in `0..n` on `k` threads there (the calling one among
     /// them), serially for `k < 2`.
@@ -198,12 +207,15 @@ impl Place for Here {
         CURRENT.with(|c| c.borrow().as_ref().map_or(1, |l| l.pool.threads().max(1)))
     }
 
-    fn dispatch() -> Dispatch {
-        CURRENT.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map_or_else(Dispatch::never, |l| l.dispatch.clone())
+    fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R {
+        CURRENT.with(|c| match c.borrow().as_ref() {
+            Some(l) => f(&l.dispatch),
+            None => f(Dispatch::never_ref()),
         })
+    }
+
+    fn cap() -> usize {
+        CURRENT.with(|c| c.borrow().as_ref().map_or(1, |l| share(l.pool.threads())))
     }
 
     fn width(work: f64, pieces: usize) -> usize {
@@ -246,7 +258,7 @@ pub fn threads() -> usize {
 /// What a section costs on the lent pool ([`Dispatch::never`] where none
 /// is).
 pub fn dispatch() -> Dispatch {
-    Here::dispatch()
+    Here::with_dispatch(Dispatch::clone)
 }
 
 /// The threads `work` ns of work in `pieces` pieces runs on here: as many
@@ -273,20 +285,6 @@ pub fn run(n: usize, work: f64, f: &Piece<'_>) {
 /// [`Rate`]).
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Here>(n, f)
-}
-
-/// [`run_width`] of `n` pieces of `work` ns on `k` threads, timed if
-/// `timed`: whether it took less than [`RATE_STALE`](constants::RATE_STALE)
-/// of the time predicted for it (the rates its work was estimated at are
-/// stale).
-pub fn run_watched(n: usize, k: usize, work: f64, timed: bool, f: &Piece<'_>) -> bool {
-    if !timed {
-        run_width(n, k, f);
-        return false;
-    }
-    let t = clock::Instant::now();
-    run_width(n, k, f);
-    rate::stale::<Here>(t.elapsed().as_nanos() as f64, work, n, k)
 }
 
 /// Items per piece for `n` items on `k` threads: about
