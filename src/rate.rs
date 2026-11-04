@@ -36,10 +36,17 @@ pub struct Rate {
 /// its runs took: per way (an option) and per size of the work (bins a
 /// factor [`TUNE_BIN_FACTOR`] apart from [`TUNE_BIN_BASE_NS`]) the measured
 /// time per op. A run takes the option that was fastest for work of its
-/// size, an option not yet measured counted at what the caller predicts for
-/// it. Now and then (one in [`TUNE_EXPLORE`]) it takes a neighbouring option
-/// instead, measured, so that a change in the code or in the machine is
-/// followed; besides, one in [`RATE_SAMPLE_EVERY`] runs is measured.
+/// size. An option not yet measured counts at the time the caller expects
+/// for it ([`Prior`]); past option 0, the reference way (serially, at the
+/// rate its runs measured), times what the runs of the nearest measured
+/// option past it took over what was expected of them: a model that was
+/// off by a factor on one way is taken to be off by as much on the next,
+/// so a library does not try every way its model overrates one after the
+/// other. Now and then (one
+/// in [`TUNE_EXPLORE`]) a run takes, measured, the option nearest to the
+/// fastest whose least time could beat it, so that a change in the code or
+/// in the machine is followed, and never one that could not; besides, one
+/// in [`RATE_SAMPLE_EVERY`] runs is measured.
 ///
 /// The per-region choice the literature tunes online (feedback-driven
 /// threading, Suleman et al. 2008; Otter, SCALO): for the width of a section
@@ -50,6 +57,30 @@ pub struct Choice {
     /// ns per op a run of a size bin took with an option, as `f32` bits;
     /// zero where none was measured.
     cells: [[AtomicU32; TUNE_ARMS]; TUNE_BINS],
+}
+
+/// What a caller predicts for an option of a [`Choice`] its runs have not
+/// measured: the time it expects, and the least the option can take (a
+/// bound: an option whose least is above the fastest's time is never
+/// explored). For a schedule of work `T1` on `k` threads with a longest
+/// dependency chain `Tinf`, Brent's bounds: `T1 / k + Tinf` expected (any
+/// greedy schedule), `max(T1 / k, Tinf)` least.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Prior {
+    /// The time expected, in ns.
+    pub expected: f64,
+    /// The least time possible, in ns.
+    pub least: f64,
+}
+
+impl Prior {
+    /// A prediction that is its own bound: `ns` expected and at least.
+    pub fn exactly(ns: f64) -> Self {
+        Prior {
+            expected: ns,
+            least: ns,
+        }
+    }
 }
 
 /// What [`Choice::pick`] chose: the option, and whether (for which size
@@ -78,57 +109,86 @@ impl Choice {
     }
 
     /// Among the options `0..n` (at most [`TUNE_ARMS`]) for `ops` ops of
-    /// `work` ns: of those available here (`predicted(option)` is some, its
-    /// time in ns), the one whose measured time, or where none is measured
-    /// the predicted, is least; now and then the next available one below
-    /// or above it. An option keeps its number wherever it is offered, so
-    /// what was measured for it is its own; option 0 where none is
-    /// available.
+    /// `work` ns: of those available here (`predicted(option)` is some),
+    /// the one whose measured time, or where none is measured the expected
+    /// one corrected by the nearest measured option's, is least; now and
+    /// then the nearest available one whose least could beat it. An option
+    /// keeps its number wherever it is offered, so what was measured for it
+    /// is its own; option 0 where none is available.
     pub fn pick(
         &self,
         work: f64,
         ops: f64,
         n: usize,
-        predicted: impl Fn(usize) -> Option<f64>,
+        predicted: impl Fn(usize) -> Option<Prior>,
     ) -> Pick {
         let n = n.clamp(1, TUNE_ARMS);
         let b = bin(work);
-        let mut times = [None; TUNE_ARMS];
-        for (o, t) in times.iter_mut().enumerate().take(n) {
-            *t = predicted(o).map(|p| self.cell(b, o).map_or(p, |per_op| per_op * ops));
-        }
-        // the options available here, in order
-        let mut open = [0usize; TUNE_ARMS];
-        let mut m = 0;
-        for (o, t) in times.iter().enumerate().take(n) {
-            if t.is_some() {
-                open[m] = o;
-                m += 1;
+        let mut prior = [None; TUNE_ARMS];
+        let mut seen = [None; TUNE_ARMS];
+        for o in 0..n {
+            prior[o] = predicted(o);
+            if prior[o].is_some() {
+                seen[o] = self.cell(b, o).map(|per_op| per_op * ops);
             }
         }
-        if m == 0 {
+        // what the measured option nearest to `o` past the reference took
+        // over what was expected of it (the slower on a tie); one where
+        // none is measured, and for the reference itself
+        let error = |o: usize| {
+            let off = |q: usize| match (seen[q], prior[q]) {
+                (Some(t), Some(p)) if q > 0 && p.expected > 0.0 => Some(t / p.expected),
+                _ => None,
+            };
+            if o == 0 {
+                return 1.0;
+            }
+            (1..n)
+                .find_map(|d| {
+                    let below = o.checked_sub(d).and_then(off);
+                    let above = (o + d < n).then(|| off(o + d)).flatten();
+                    match (below, above) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        (x, y) => x.or(y),
+                    }
+                })
+                .unwrap_or(1.0)
+        };
+        let mut time = [f64::INFINITY; TUNE_ARMS];
+        let mut best = None;
+        for o in 0..n {
+            if let Some(p) = prior[o] {
+                time[o] = seen[o].unwrap_or_else(|| p.expected * error(o));
+                if best.is_none_or(|q: usize| time[o] < time[q]) {
+                    best = Some(o);
+                }
+            }
+        }
+        let Some(best) = best else {
             return Pick {
                 option: 0,
                 bin: b,
                 measure: false,
             };
-        }
-        let time = |i: usize| times[open[i]].unwrap_or(f64::INFINITY);
-        let mut best = 0;
-        for i in 1..m {
-            if time(i) < time(best) {
-                best = i;
-            }
-        }
-        let mut at = best;
-        let explore = m > 1 && one_in(TUNE_EXPLORE);
-        if explore {
-            let down = best > 0 && (best + 1 >= m || one_in(2));
-            at = if down { best - 1 } else { best + 1 };
-        }
-        let option = open[at];
+        };
+        // exploring: the nearest option that could beat the fastest, below
+        // or above it alike
+        let could = |o: usize| o != best && prior[o].is_some_and(|p| p.least < time[best]);
+        let explore = one_in(TUNE_EXPLORE).then(|| {
+            let down = one_in(2);
+            (1..n).find_map(|d| {
+                let below = best.checked_sub(d).filter(|&o| could(o));
+                let above = Some(best + d).filter(|&o| o < n && could(o));
+                if down {
+                    below.or(above)
+                } else {
+                    above.or(below)
+                }
+            })
+        });
+        let option = explore.flatten().unwrap_or(best);
         let measure =
-            explore || self.cell(b, option).is_none() || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
+            option != best || seen[option].is_none() || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
         Pick {
             option,
             bin: b,
@@ -434,7 +494,7 @@ impl<'r> Work<'r> {
         }
         let pick = rate
             .widths
-            .pick(w, self.ops, n, |a| Some(predicted(arms[a])));
+            .pick(w, self.ops, n, |a| Some(Prior::exactly(predicted(arms[a]))));
         if pick.measure {
             NEXT.with(|c| c.set(Some((rate.key(), pick))));
         }

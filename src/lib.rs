@@ -43,7 +43,7 @@ pub use clock::Instant;
 pub use constants::{GAIN, PIECES_PER_WORKER, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use rate::{draw, Choice, Go, Pick, Rate, SerialRun, Timing, Work};
+pub use rate::{draw, Choice, Go, Pick, Prior, Rate, SerialRun, Timing, Work};
 pub use workers::Workers;
 
 /// `m` locked: a lock is poisoned only by a panic its section carries on.
