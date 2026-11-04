@@ -219,9 +219,12 @@ impl Choice {
         if ns > 0.0 && ops > 0.0 {
             let (b, o) = (pick.bin.min(TUNE_BINS - 1), pick.option.min(TUNE_ARMS - 1));
             let seen = (ns / ops) as f32;
-            let runs = self.runs[b][o]
-                .fetch_update(Relaxed, Relaxed, |r| Some(r.saturating_add(1).min(2)));
-            match runs.unwrap_or(2) {
+            // a count, nothing else rests on it: a race only moves a warm-up
+            let runs = self.runs[b][o].load(Relaxed);
+            if runs < 2 {
+                self.runs[b][o].store(runs + 1, Relaxed);
+            }
+            match runs {
                 // the first run, and the one that replaces it
                 0 | 1 => self.cells[b][o].store(seen.to_bits(), Relaxed),
                 _ => update(&self.cells[b][o], seen, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP),
