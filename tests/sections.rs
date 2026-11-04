@@ -181,6 +181,24 @@ fn rayon_sections_measure_the_pool_and_run_every_piece() {
 
 #[cfg(feature = "rayon")]
 #[test]
+fn a_rayon_piece_leaves_its_sections_the_whole_pool() {
+    // rayon runs nested pieces on free threads only: a piece of a section
+    // two wide still opens its sections on all four
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let inner = AtomicUsize::new(0);
+        rspool::rayon::run_width(2, 2, &|_| {
+            inner.fetch_max(rspool::rayon::width(f64::INFINITY, 100), Ordering::Relaxed);
+        });
+        assert_eq!(inner.into_inner(), 4);
+    });
+}
+
+#[cfg(feature = "rayon")]
+#[test]
 fn a_caller_on_one_thread_enters_a_wider_pool_for_work_worth_it() {
     // from a pool of one thread, as a solve under a policy of its own
     // threads is asked from: a second of work is worth the wider pool, a

@@ -196,10 +196,16 @@ fn rayon_run(n: usize, k: usize, f: &Piece<'_>) {
         return (0..n).for_each(f);
     }
     crate::WIDE.with(|w| w.set(w.get() + 1));
-    rayon_pieces(n, k, (cap / k).max(1), f)
+    // Its pieces leave their sections the whole pool: rayon runs a nested
+    // section's pieces only on threads that are free, so nothing is
+    // oversubscribed, and a share would keep the threads a short piece
+    // leaves behind from a long one's sections (a factorization's lookahead
+    // ran its update on half the pool, 10 to 20 % slower on four threads).
+    rayon_pieces(n, k, 0, f)
 }
 
-/// The pieces of a rayon section, each with its share `inner`.
+/// The pieces of a rayon section, each leaving its sections the share
+/// `inner` (0: the whole pool).
 fn rayon_pieces(n: usize, k: usize, inner: usize, f: &Piece<'_>) {
     use ::rayon::prelude::*;
     let lent: Option<&Lent> = None;
