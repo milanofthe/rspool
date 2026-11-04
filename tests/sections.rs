@@ -174,6 +174,22 @@ fn rayon_sections_measure_the_pool_and_run_every_piece() {
     });
 }
 
+#[cfg(feature = "rayon")]
+#[test]
+fn a_caller_on_one_thread_enters_a_wider_pool_for_work_worth_it() {
+    // from a pool of one thread, as a solve under a policy of its own
+    // threads is asked from: a second of work is worth the wider pool, a
+    // nanosecond is not
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    one.install(|| {
+        assert!(rspool::rayon::width_on(4, 1e9, 64) > 1);
+        assert_eq!(rspool::rayon::width_on(4, 1.0, 64), 1);
+    });
+}
+
 #[test]
 fn a_section_takes_the_width_its_runs_were_fastest_on() {
     use rspool::{Go, Here, Work};

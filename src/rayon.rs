@@ -152,23 +152,6 @@ fn in_list(m: &[(usize, bool, Dispatch)], threads: usize, inside: bool) -> Optio
         .map(|e| e.2.clone())
 }
 
-/// What a section costs here as far as it is known, measuring nothing: the
-/// lent pool's, else the current rayon pool's as measured (assumed before).
-/// A measurement runs sections on the pool, which a caller asking on its way
-/// into another pool must not: a worker of a foreign pool would take that
-/// pool's own work while it waits.
-fn known() -> Dispatch {
-    if let Some(l) = current() {
-        return l.dispatch;
-    }
-    let threads = ::rayon::current_num_threads();
-    if threads < 2 {
-        return kept(true, 1);
-    }
-    found(threads, ::rayon::current_thread_index().is_some())
-        .unwrap_or_else(|| kept(false, threads))
-}
-
 /// Measure what a section costs on the current rayon pool now, if nobody
 /// did yet: for a pool just built, whose workers nothing else keeps busy.
 pub fn prepare() {
@@ -182,7 +165,11 @@ pub fn prepare() {
 /// `threads` threads the caller is about to enter: as [`width`] where that
 /// pool is the lent one or the current rayon pool, else as a rayon pool of
 /// as many threads measured when one was last used from its workers
-/// (assumed before), the section into it from here paid on top.
+/// (assumed before), entering it paid on top: a piece handed to one of its
+/// workers, what a section of two costs there. Nothing is measured: a
+/// measurement runs sections on a pool, which a caller on its way into
+/// another must not (a worker of a foreign pool would take that pool's own
+/// work while it waits).
 pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
     if threads < 2 || pieces < 2 || !(work > 0.0) {
         return 1;
@@ -190,11 +177,8 @@ pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
     if current().is_some() || ::rayon::current_num_threads() == threads {
         return width(work, pieces).min(threads);
     }
-    let enter = known().cost(2);
-    found(threads, true)
-        .unwrap_or_else(|| kept(false, threads))
-        .width_after(work, pieces, enter)
-        .min(threads)
+    let there = found(threads, true).unwrap_or_else(|| kept(false, threads));
+    there.width_after(work, pieces, there.cost(2)).min(threads)
 }
 
 /// `f(i)` for `i` in `0..n` on `k` threads of the current rayon pool.
