@@ -250,9 +250,12 @@ pub(crate) fn lent_run(l: &Lent, n: usize, k: usize, f: &Piece<'_>) {
     l.pool.run_width(n, k, &|i| piece(Some(l), inner, || f(i)));
 }
 
-/// The threads of the lent pool, one where none is.
+/// The threads of the lent pool this thread may use: all of them, or in a
+/// piece of a section its share of them; one where none is lent. What a
+/// library sizes its own work by: a piece of a sweep whose every thread
+/// takes points has one, as if it ran alone.
 pub fn threads() -> usize {
-    Here::threads()
+    share(Here::threads()).max(1)
 }
 
 /// What a section costs on the lent pool ([`Dispatch::never`] where none

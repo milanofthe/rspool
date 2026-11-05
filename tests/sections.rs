@@ -101,12 +101,16 @@ fn a_piece_leaves_its_sections_its_share_of_the_pool() {
     };
     rspool::install_lent(lent, || {
         assert_eq!(rspool::width(f64::INFINITY, 100), 8);
-        // a section as wide as the pool: its pieces' sections run serially
+        // a section as wide as the pool: its pieces' sections run serially,
+        // and a piece has one thread to size its work by
         let inner = AtomicUsize::new(usize::MAX);
+        let threads = AtomicUsize::new(0);
         rspool::run_width(8, 8, &|_| {
             inner.fetch_min(rspool::width(f64::INFINITY, 100), Ordering::Relaxed);
+            threads.fetch_max(rspool::threads(), Ordering::Relaxed);
         });
         assert_eq!(inner.into_inner(), 1);
+        assert_eq!(threads.into_inner(), 1);
         // two wide: each piece's sections get four threads
         let inner = AtomicUsize::new(0);
         rspool::run_width(2, 2, &|_| {

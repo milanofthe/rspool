@@ -238,9 +238,11 @@ pub fn pool_dispatch() -> Dispatch {
     with_rayon(threads, Dispatch::clone)
 }
 
-/// The threads here: the lent pool's, or the current rayon pool's.
+/// The threads this thread may use here: the lent pool's (in a piece of a
+/// section its share of them, see [`crate::threads`]), or the current
+/// rayon pool's.
 pub fn threads() -> usize {
-    Rayon::threads()
+    share(Rayon::threads()).max(1)
 }
 
 /// What a section costs here: on the lent pool, or on the current rayon
