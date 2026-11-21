@@ -50,8 +50,9 @@ pub struct Rate {
 /// off by a factor on one way is taken to be off by as much on the next,
 /// so a library does not try every way its model overrates one after the
 /// other. Now and then (one
-/// in [`TUNE_EXPLORE`]) a run takes, measured, the option nearest to the
-/// fastest whose least time could beat it, so that a change in the code or
+/// in [`TUNE_EXPLORE`]) two runs take the option nearest to the fastest
+/// whose least time could beat it, the second measured (the first finds
+/// the way where the way chosen left it), so that a change in the code or
 /// in the machine is followed, and never one that could not; besides, one
 /// in [`RATE_SAMPLE_EVERY`] runs is measured. The first run of a way is a
 /// warm-up (cold caches, first-touched scratch): it counts at no more than
@@ -69,6 +70,9 @@ pub struct Choice {
     /// The runs measured per cell, up to two: the first warms the way up
     /// (its code, its caches, its scratch) and is replaced by the second.
     runs: [[AtomicU8; TUNE_ARMS]; TUNE_BINS],
+    /// The option an exploration ran unmeasured and the next run takes
+    /// again, measured, plus one; zero where none.
+    again: AtomicU8,
 }
 
 /// What a caller predicts for an option of a [`Choice`] its runs have not
@@ -119,6 +123,7 @@ impl Choice {
         Choice {
             cells: [const { [const { AtomicU32::new(0) }; TUNE_ARMS] }; TUNE_BINS],
             runs: [const { [const { AtomicU8::new(0) }; TUNE_ARMS] }; TUNE_BINS],
+            again: AtomicU8::new(0),
         }
     }
 
@@ -207,13 +212,30 @@ impl Choice {
                 }
             })
         });
-        let option = explore.flatten().unwrap_or(best);
-        let measure = option != best
-            || seen[option].is_none()
-            || self.warming(b, option)
+        // An exploration runs its option twice, the second run measured:
+        // the first finds the way cold where the way chosen left it (threads
+        // idle that a wider way wakes), as a way's first run finds its caches.
+        let again = self.again.swap(0, Relaxed) as usize;
+        if again > 0 && again <= n && prior[again - 1].is_some() {
+            return Pick {
+                option: again - 1,
+                bin: b,
+                measure: true,
+            };
+        }
+        if let Some(o) = explore.flatten() {
+            self.again.store(o as u8 + 1, Relaxed);
+            return Pick {
+                option: o,
+                bin: b,
+                measure: false,
+            };
+        }
+        let measure = seen[best].is_none()
+            || self.warming(b, best)
             || (ops > 0.0 && one_in(RATE_SAMPLE_EVERY));
         Pick {
-            option,
+            option: best,
             bin: b,
             measure,
         }

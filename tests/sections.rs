@@ -374,6 +374,41 @@ fn a_choice_never_explores_an_option_that_cannot_win() {
 }
 
 #[test]
+fn an_exploration_is_measured_on_its_second_run() {
+    use rspool::{Choice, Prior};
+    let c = Choice::new();
+    // option 1, predicted slower but able to win, takes three times option
+    // 0's time on a run after option 0 and half of it on a run after itself
+    // (threads the narrower way left idle, woken by its first run)
+    let predicted = |o: usize| {
+        Some(match o {
+            0 => Prior::exactly(1e3),
+            _ => Prior {
+                expected: 2e3,
+                least: 4e2,
+            },
+        })
+    };
+    let (mut last, mut ones) = (0, 0);
+    for i in 0..5000 {
+        let p = c.pick(1e3, 1e3, 2, predicted);
+        let ns = match (p.option, last) {
+            (0, _) => 1e3,
+            (_, 1) => 5e2,
+            _ => 3e3,
+        };
+        last = p.option;
+        if p.measured() {
+            c.record(p, ns, 1e3);
+        }
+        if i >= 4000 && p.option == 1 {
+            ones += 1;
+        }
+    }
+    assert!(ones > 900, "{ones} of the last 1000 on option 1");
+}
+
+#[test]
 fn a_wide_run_lowers_a_prior_too_high_and_never_raises_a_rate() {
     use rspool::{Go, Here, Work};
     let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
