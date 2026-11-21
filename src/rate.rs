@@ -624,19 +624,29 @@ impl<'r> Work<'r> {
     }
 
     /// The section as `n` pieces on `k` threads at the place `P`, measured
-    /// when [`go`](Self::go) asked for it, or sampled: its time teaches the
-    /// rate's arm for `k` threads, as [`watch`](Self::watch); and the time
-    /// its pieces ran teaches the rate's ns per op ([`Rate::learn_wide`]),
-    /// unless a piece sent a section of its own wide. Work estimated by its
-    /// caller ([`estimated`](Self::estimated)) teaches the rate what the
-    /// estimate was off by.
+    /// when [`go`](Self::go) asked for it, or sampled ([`wide_busy`](
+    /// Self::wide_busy)).
     pub fn wide<P: Place>(&self, n: usize, k: usize, f: &Piece<'_>) {
+        let _ = self.wide_busy::<P>(n, k, f);
+    }
+
+    /// [`wide`](Self::wide), and the time its pieces ran, in ns, where the
+    /// run was measured and no piece sent a section of its own wide. The
+    /// run's time teaches the rate's arm for `k` threads, as [`watch`](
+    /// Self::watch); the pieces' time teaches its ns per op
+    /// ([`Rate::learn_wide`]) for work of `ops` at the rate ([`of`](
+    /// Self::of)). Work its caller estimated ([`estimated`](
+    /// Self::estimated)), parts at their own rates, is the caller's to
+    /// teach with it, as its serial runs are.
+    pub fn wide_busy<P: Place>(&self, n: usize, k: usize, f: &Piece<'_>) -> Option<f64> {
         let Some(rate) = self.rate else {
-            return P::run_width(n, k, f);
+            P::run_width(n, k, f);
+            return None;
         };
         let next = self.take_next();
         if next.is_none() && !rate.sample(self.ops) {
-            return P::run_width(n, k, f);
+            P::run_width(n, k, f);
+            return None;
         }
         let (busy, nested) = (AtomicU64::new(0), AtomicBool::new(false));
         let timed = |i: usize| {
@@ -653,14 +663,14 @@ impl<'r> Work<'r> {
         let ns = t.elapsed().as_nanos() as f64;
         let pick = next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k)));
         rate.widths.record(pick, ns, self.ops);
-        let busy = busy.into_inner() as f64;
-        if !nested.into_inner() {
-            match self.ns {
-                None => rate.learn_wide(busy, self.ops),
-                Some(est) if est > 0.0 => rate.learn_wide(busy * rate.ns_per_op() / est, 1.0),
-                Some(_) => {}
-            }
+        if nested.into_inner() {
+            return None;
         }
+        let busy = busy.into_inner() as f64;
+        if self.ns.is_none() {
+            rate.learn_wide(busy, self.ops);
+        }
+        Some(busy)
     }
 
     /// `f`, the section run wide on `k` threads at `P`: measured when

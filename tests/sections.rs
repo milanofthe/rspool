@@ -407,6 +407,29 @@ fn a_wide_run_lowers_a_prior_too_high_and_never_raises_a_rate() {
 }
 
 #[test]
+fn estimated_work_hands_its_pieces_time_to_the_caller() {
+    use rspool::{Here, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        // 16 pieces of about 50 us, estimated at 100 ms by its caller
+        let r = Rate::new(1000.0);
+        let work = Work::estimated(1e8, 1e5, &r);
+        let busy: Vec<f64> = (0..200)
+            .filter_map(|_| work.wide_busy::<Here>(16, 4, &|_| sleep(50)))
+            .collect();
+        assert!(!busy.is_empty());
+        assert!(busy.iter().all(|&b| b >= 16.0 * 50e3), "{busy:?}");
+        // the caller's rates are the caller's to teach
+        assert_eq!(r.ns_per_op(), 1000.0);
+    });
+}
+
+#[test]
 fn a_wide_run_with_a_wide_section_inside_teaches_its_rate_nothing() {
     use rspool::{Here, Work};
     let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
