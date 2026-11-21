@@ -372,3 +372,113 @@ fn a_choice_never_explores_an_option_that_cannot_win() {
         }
     }
 }
+
+#[test]
+fn a_wide_run_lowers_a_prior_too_high_and_never_raises_a_rate() {
+    use rspool::{Go, Here, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        // 1e5 ops at a prior of 1000 ns: 100 ms predicted, every section
+        // goes wide; its 16 pieces take about 50 us each, 8 ns an op
+        let r = Rate::new(1000.0);
+        let work = Work::of(1e5, &r);
+        for _ in 0..200 {
+            match work.go::<Here>(16) {
+                Go::Wide(k) => work.wide::<Here>(16, k, &|_| sleep(50)),
+                Go::Here => work.serial(|| (0..16).for_each(|_| sleep(50))),
+            }
+        }
+        assert!(r.ns_per_op() < 100.0, "{}", r.ns_per_op());
+        // a rate a serial run measured low is not raised by wide runs
+        // whose pieces take longer
+        let low = Rate::new(1000.0);
+        low.learn(1e4, 1e5);
+        let slow = Work::of(1e5, &low);
+        for _ in 0..200 {
+            slow.wide::<Here>(16, 4, &|_| sleep(50));
+        }
+        assert_eq!(low.ns_per_op(), 0.1f32 as f64);
+    });
+}
+
+#[test]
+fn a_wide_run_with_a_wide_section_inside_teaches_its_rate_nothing() {
+    use rspool::{Here, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        let r = Rate::new(1000.0);
+        let work = Work::of(1e5, &r);
+        // two pieces on two threads, each sending four pieces to the other two
+        for _ in 0..200 {
+            work.wide::<Here>(2, 2, &|_| rspool::run_width(4, 2, &|_| sleep(20)));
+        }
+        assert_eq!(r.ns_per_op(), 1000.0);
+    });
+}
+
+/// The lent pool, where a section wider than two threads waits a
+/// millisecond for its last helper: the full width is not the fastest.
+struct Laggy;
+
+impl rspool::Place for Laggy {
+    fn threads() -> usize {
+        rspool::Here::threads()
+    }
+    fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R {
+        rspool::Here::with_dispatch(f)
+    }
+    fn cap() -> usize {
+        rspool::Here::cap()
+    }
+    fn width(work: f64, pieces: usize) -> usize {
+        rspool::Here::width(work, pieces)
+    }
+    fn run_width(n: usize, k: usize, f: &rspool::Piece<'_>) {
+        rspool::Here::run_width(n, k, f);
+        if k > 2 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+#[test]
+fn a_section_leaves_the_full_width_where_a_narrower_one_is_faster() {
+    use rspool::{Go, Work};
+    let sleep = |us| std::thread::sleep(std::time::Duration::from_micros(us));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        // 16 pieces of 50 us under a prior a hundred times too high: four
+        // threads predicted fastest, but they take 1.2 ms, two 0.4 ms
+        let r = Rate::new(500.0);
+        let work = Work::of(1e5, &r);
+        let piece = |_: usize| sleep(50);
+        for _ in 0..600 {
+            match work.go::<Laggy>(16) {
+                Go::Wide(k) => work.wide::<Laggy>(16, k, &piece),
+                Go::Here => work.serial(|| (0..16).for_each(piece)),
+            }
+        }
+        let two = (0..200)
+            .filter(|_| {
+                let go = work.go::<Laggy>(16);
+                let _ = work.serial_timed();
+                go == Go::Wide(2)
+            })
+            .count();
+        assert!(two > 150, "{two} of 200 on two threads");
+    });
+}

@@ -2,7 +2,7 @@
 //! which of a library's ways to run some work is fastest: all measured on
 //! the runs.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
 use crate::constants::{
     RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
@@ -16,7 +16,12 @@ use crate::{Dispatch, Piece, Place};
 /// The cost of an op is a prior until serial runs are measured (one in
 /// [`RATE_SAMPLE_EVERY`]), then their running mean; a section's work is its
 /// ops at that cost. A serial run inside which a section went wide (a call
-/// whose own work has wide sections) does not teach it.
+/// whose own work has wide sections) does not teach it. A measured wide run
+/// teaches it the time its pieces ran over its ops, but only ever lower: its
+/// pieces share the machine (caches, memory, cores), so their time per op is
+/// at least a serial run's, and a wide run can show a prior too high or code
+/// gone faster but never that an op got dearer. Without that, work that
+/// always runs wide would keep its prior however far off.
 ///
 /// How wide a section runs is a [`Choice`] among widths (1, 2, 4, ...
 /// threads up to what is free here), an arm not yet measured counted at what
@@ -374,6 +379,21 @@ impl Rate {
         }
     }
 
+    /// The pieces of a wide run of `ops` ops ran `ns` ns in all: the rate
+    /// moves down toward it ([`RATE_WEIGHT_DOWN`]), a prior higher than it
+    /// replaced at once, and never moves up (see [`Rate`]).
+    pub fn learn_wide(&self, ns: f64, ops: f64) {
+        if ns > 0.0 && ops > 0.0 {
+            let seen = (ns / ops) as f32;
+            if !self.learned() {
+                // positive floats order as their bits do
+                self.ns.fetch_min(seen.to_bits(), Relaxed);
+                return;
+            }
+            update(&self.ns, seen, RATE_WEIGHT_DOWN, 0.0);
+        }
+    }
+
     /// `f`, a serial run of `ops` ops, measured if sampled.
     pub fn time<R>(&self, ops: f64, f: impl FnOnce() -> R) -> R {
         let timing = self.begin(ops, false);
@@ -604,9 +624,43 @@ impl<'r> Work<'r> {
     }
 
     /// The section as `n` pieces on `k` threads at the place `P`, measured
-    /// when [`go`](Self::go) asked for it ([`watch`](Self::watch)).
+    /// when [`go`](Self::go) asked for it, or sampled: its time teaches the
+    /// rate's arm for `k` threads, as [`watch`](Self::watch); and the time
+    /// its pieces ran teaches the rate's ns per op ([`Rate::learn_wide`]),
+    /// unless a piece sent a section of its own wide. Work estimated by its
+    /// caller ([`estimated`](Self::estimated)) teaches the rate what the
+    /// estimate was off by.
     pub fn wide<P: Place>(&self, n: usize, k: usize, f: &Piece<'_>) {
-        self.watch::<P, _>(n, k, || P::run_width(n, k, f))
+        let Some(rate) = self.rate else {
+            return P::run_width(n, k, f);
+        };
+        let next = self.take_next();
+        if next.is_none() && !rate.sample(self.ops) {
+            return P::run_width(n, k, f);
+        }
+        let (busy, nested) = (AtomicU64::new(0), AtomicBool::new(false));
+        let timed = |i: usize| {
+            let wide = crate::wide_count();
+            let t = crate::clock::Instant::now();
+            f(i);
+            busy.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+            if crate::wide_count() != wide {
+                nested.store(true, Relaxed);
+            }
+        };
+        let t = crate::clock::Instant::now();
+        P::run_width(n, k, &timed);
+        let ns = t.elapsed().as_nanos() as f64;
+        let pick = next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k)));
+        rate.widths.record(pick, ns, self.ops);
+        let busy = busy.into_inner() as f64;
+        if !nested.into_inner() {
+            match self.ns {
+                None => rate.learn_wide(busy, self.ops),
+                Some(est) if est > 0.0 => rate.learn_wide(busy * rate.ns_per_op() / est, 1.0),
+                Some(_) => {}
+            }
+        }
     }
 
     /// `f`, the section run wide on `k` threads at `P`: measured when
