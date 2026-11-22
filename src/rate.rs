@@ -5,8 +5,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
 use crate::constants::{
-    RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
-    TUNE_BIN_FACTOR, TUNE_EXPLORE, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP,
+    GAIN, RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS,
+    TUNE_BIN_BASE_NS, TUNE_BIN_FACTOR, TUNE_EXPLORE, TUNE_WEIGHT_DOWN, TUNE_WEIGHT_UP,
 };
 use crate::{Dispatch, Piece, Place};
 
@@ -141,6 +141,35 @@ impl Choice {
         n: usize,
         predicted: impl Fn(usize) -> Option<Prior>,
     ) -> Pick {
+        self.pick_toward(work, ops, n, 1.0, predicted)
+    }
+
+    /// [`pick`](Self::pick) among options ordered by how much of the
+    /// machine they take (the widths of a section): an option is taken over
+    /// a later one only where it saves [`GAIN`] of the later one's time.
+    /// A narrower way that is about as fast is not worth it: whatever it
+    /// leaves idle is slower to take up again (threads asleep, caches cold),
+    /// which its own runs do not show and the wider way's later ones do.
+    pub fn pick_wide(
+        &self,
+        work: f64,
+        ops: f64,
+        n: usize,
+        predicted: impl Fn(usize) -> Option<Prior>,
+    ) -> Pick {
+        self.pick_toward(work, ops, n, 1.0 - GAIN, predicted)
+    }
+
+    /// [`pick`](Self::pick), a later option taken over the fastest where its
+    /// time times `keep` is no more than the fastest's.
+    fn pick_toward(
+        &self,
+        work: f64,
+        ops: f64,
+        n: usize,
+        keep: f64,
+        predicted: impl Fn(usize) -> Option<Prior>,
+    ) -> Pick {
         let n = n.clamp(1, TUNE_ARMS);
         let b = bin(work);
         let mut prior = [None; TUNE_ARMS];
@@ -190,6 +219,13 @@ impl Choice {
                 }
             }
         }
+        // the latest option within reach of the fastest
+        let best = best.map(|q| {
+            (q..n)
+                .rev()
+                .find(|&o| time[o] * keep <= time[q])
+                .unwrap_or(q)
+        });
         let Some(best) = best else {
             return Pick {
                 option: 0,
@@ -581,7 +617,7 @@ impl<'r> Work<'r> {
         }
         let pick = rate
             .widths
-            .pick(w, self.ops, n, |a| Some(Prior::exactly(predicted(arms[a]))));
+            .pick_wide(w, self.ops, n, |a| Some(Prior::exactly(predicted(arms[a]))));
         if pick.measure {
             NEXT.with(|c| c.set(Some((rate.key(), pick))));
         }

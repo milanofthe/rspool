@@ -374,6 +374,36 @@ fn a_choice_never_explores_an_option_that_cannot_win() {
 }
 
 #[test]
+fn a_width_about_as_fast_as_a_wider_one_is_not_taken_over_it() {
+    use rspool::{Choice, Prior};
+    let exactly = |o: usize| Some(Prior::exactly([4e3, 2e3, 1e3][o]));
+    // the widest a tenth slower than the middle one: the widest
+    let c = Choice::new();
+    for _ in 0..2000 {
+        let p = c.pick_wide(1e3, 1e3, 3, exactly);
+        if p.measured() {
+            c.record(p, [4e3, 1e3, 1.1e3][p.option], 1e3);
+        }
+    }
+    let wide = (0..200)
+        .filter(|_| c.pick_wide(1e3, 1e3, 3, exactly).option == 2)
+        .count();
+    assert!(wide > 180, "{wide} of 200 on the widest");
+    // the widest three times the middle one's time: the middle one
+    let c = Choice::new();
+    for _ in 0..2000 {
+        let p = c.pick_wide(1e3, 1e3, 3, exactly);
+        if p.measured() {
+            c.record(p, [4e3, 1e3, 3e3][p.option], 1e3);
+        }
+    }
+    let mid = (0..200)
+        .filter(|_| c.pick_wide(1e3, 1e3, 3, exactly).option == 1)
+        .count();
+    assert!(mid > 180, "{mid} of 200 on the middle one");
+}
+
+#[test]
 fn an_exploration_is_measured_on_its_second_run() {
     use rspool::{Choice, Prior};
     let c = Choice::new();
