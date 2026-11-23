@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::constants::{SPIN, SPIN_YIELD_EVERY};
-use crate::{lock, Dispatch, Pool, Spawn};
+use crate::{lock, Dispatch, Origin, Pool, Spawn};
 
 /// A pool of threads that steal work: `threads - 1` workers and the thread
 /// that starts a section, which takes part in it. A section runs on as
@@ -200,6 +200,7 @@ struct RunJob<'a> {
     /// Helpers queued and not yet finished or taken back.
     out: AtomicUsize,
     panic: Panic,
+    origin: Origin,
 }
 
 impl RunJob<'_> {
@@ -218,7 +219,7 @@ impl RunJob<'_> {
     /// `data` is a `RunJob` whose `out` counts this helper.
     unsafe fn help(data: *const ()) {
         let job = unsafe { &*(data as *const RunJob<'_>) };
-        job.take();
+        job.origin.run(|| job.take());
         // The last touch: the starting thread may return from here on.
         job.out.fetch_sub(1, SeqCst);
     }
@@ -229,16 +230,22 @@ struct SideJob<'a> {
     f: Mutex<Option<&'a mut (dyn FnMut() + Send)>>,
     done: AtomicBool,
     panic: Panic,
+    origin: Origin,
 }
 
 impl SideJob<'_> {
+    /// The side, run once.
+    fn call(&self) {
+        if let Some(f) = lock(&self.f).take() {
+            catch(&self.panic, f);
+        }
+    }
+
     /// # Safety
     /// `data` is a `SideJob` its `join` waits for.
     unsafe fn run(data: *const ()) {
         let job = unsafe { &*(data as *const SideJob<'_>) };
-        if let Some(f) = lock(&job.f).take() {
-            catch(&job.panic, f);
-        }
+        job.origin.run(|| job.call());
         // The last touch: the joining thread may return from here on.
         job.done.store(true, SeqCst);
     }
@@ -255,6 +262,7 @@ struct ScopeJob<'p> {
 struct TaskJob<'s> {
     scope: *const ScopeJob<'s>,
     task: Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>,
+    origin: Origin,
 }
 
 impl<'s> Spawn<'s> for ScopeJob<'s> {
@@ -263,6 +271,7 @@ impl<'s> Spawn<'s> for ScopeJob<'s> {
         let boxed = Box::new(TaskJob {
             scope: self as *const ScopeJob<'s>,
             task,
+            origin: Origin::here(),
         });
         self.shared.push(Job {
             data: Box::into_raw(boxed) as *const (),
@@ -275,9 +284,13 @@ impl TaskJob<'_> {
     /// # Safety
     /// `data` is a boxed `TaskJob` whose scope waits for it.
     unsafe fn run(data: *const ()) {
-        let TaskJob { scope, task } = *unsafe { Box::from_raw(data as *mut TaskJob<'_>) };
+        let TaskJob {
+            scope,
+            task,
+            origin,
+        } = *unsafe { Box::from_raw(data as *mut TaskJob<'_>) };
         let scope = unsafe { &*scope };
-        catch(&scope.panic, || task(scope));
+        origin.run(|| catch(&scope.panic, || task(scope)));
         // The last touch: the scope may return from here on.
         scope.open.fetch_sub(1, SeqCst);
     }
@@ -350,6 +363,7 @@ impl Pool for Workers {
             done: AtomicUsize::new(0),
             out: AtomicUsize::new(0),
             panic: Mutex::new(None),
+            origin: Origin::here(),
         };
         let helper = Job {
             data: &job as *const RunJob<'_> as *const (),
@@ -380,6 +394,7 @@ impl Pool for Workers {
             f: Mutex::new(Some(b)),
             done: AtomicBool::new(false),
             panic: Mutex::new(None),
+            origin: Origin::here(),
         };
         let job = Job {
             data: &side as *const SideJob<'_> as *const (),
@@ -389,8 +404,8 @@ impl Pool for Workers {
         let first: Panic = Mutex::new(None);
         catch(&first, a);
         if sh.retract(job) {
-            // SAFETY: taken back, so this thread alone runs it.
-            unsafe { job.execute() };
+            // taken back: this thread alone runs it, inside the join
+            side.call();
         } else {
             sh.wait_until(|| side.done.load(SeqCst));
         }

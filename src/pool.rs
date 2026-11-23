@@ -1,7 +1,7 @@
 //! What a set of worker threads offers: sections of pieces, two sides, a
 //! scope of tasks, and what a section costs on it.
 
-use crate::Dispatch;
+use crate::{Dispatch, Origin};
 
 /// The pieces of a section: `f(i)` for every `i` of it.
 pub type Piece<'a> = dyn Fn(usize) + Sync + 'a;
@@ -45,7 +45,7 @@ pub trait Pool: Send + Sync {
         loop {
             let task = crate::lock(&queue.0).pop_front();
             match task {
-                Some(task) => task(&queue),
+                Some((origin, task)) => origin.run(|| task(&queue)),
                 None => return,
             }
         }
@@ -62,11 +62,11 @@ pub trait Spawn<'s>: Sync {
 }
 
 /// The tasks of a scope, run one after the other.
-struct Queue<'s>(std::sync::Mutex<std::collections::VecDeque<Task<'s>>>);
+struct Queue<'s>(std::sync::Mutex<std::collections::VecDeque<(Origin, Task<'s>)>>);
 
 impl<'s> Spawn<'s> for Queue<'s> {
     fn spawn(&self, task: Task<'s>) {
-        crate::lock(&self.0).push_back(task);
+        crate::lock(&self.0).push_back((Origin::here(), task));
     }
 }
 
