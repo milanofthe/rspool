@@ -87,49 +87,23 @@ thread_local! {
     pub(crate) static WIDE: Cell<u64> = const { Cell::new(0) };
     /// Pieces of sections this thread is running.
     static IN_PIECE: Cell<u32> = const { Cell::new(0) };
-    /// Its address tells this thread from the others ([`Origin`]).
-    static MARK: u8 = const { 0 };
 }
 
-/// This thread among the live ones (never zero).
-fn mark() -> usize {
-    MARK.with(|m| m as *const u8 as usize)
-}
-
-/// Where a task was issued: the current rsprobe node there, and the thread
-/// on which the task runs inside the issuing call, if any (`0`: none).
+/// Where a task was issued: the current rsprobe node there, entered by
+/// whichever thread runs the task. On a worker the task's time is `busy`
+/// of its scopes; on the issuing thread itself only the node changes.
 #[derive(Clone, Copy)]
-pub(crate) struct Origin {
-    node: rsprobe::Handle,
-    inline: usize,
-}
+pub(crate) struct Origin(rsprobe::Handle);
 
 impl Origin {
-    /// A task queued to a pool: whichever thread takes it from the queue
-    /// is outside the issuing call, the issuing one included.
-    pub(crate) fn queued() -> Origin {
-        Origin {
-            node: rsprobe::current(),
-            inline: 0,
-        }
-    }
-
-    /// A task this thread may run inside the issuing call (a rayon piece).
-    #[cfg(feature = "rayon")]
+    /// The node current on this thread, for a task issued here.
     pub(crate) fn here() -> Origin {
-        Origin {
-            node: rsprobe::current(),
-            inline: mark(),
-        }
+        Origin(rsprobe::current())
     }
 
-    /// `f`, with the issuing node entered unless this thread runs it
-    /// inside the issuing call.
+    /// `f` under the issuing node.
     pub(crate) fn run<R>(self, f: impl FnOnce() -> R) -> R {
-        if self.inline == mark() {
-            return f();
-        }
-        let _node = self.node.enter();
+        let _node = self.0.enter();
         f()
     }
 }

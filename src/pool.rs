@@ -66,7 +66,7 @@ struct Queue<'s>(std::sync::Mutex<std::collections::VecDeque<(Origin, Task<'s>)>
 
 impl<'s> Spawn<'s> for Queue<'s> {
     fn spawn(&self, task: Task<'s>) {
-        crate::lock(&self.0).push_back((Origin::queued(), task));
+        crate::lock(&self.0).push_back((Origin::here(), task));
     }
 }
 

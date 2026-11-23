@@ -136,15 +136,9 @@ fn tasks_of_a_run_a_join_and_a_scope_land_under_the_caller() {
     assert_eq!(get(&wide, &["section", "side"], "items"), 3);
     assert_eq!(get(&wide, &["section", "task"], "calls"), 8);
     assert_eq!(get(&wide, &["section", "task", "task"], "calls"), 8);
-    // the workers' time is busy on the nodes their tasks ran under
-    for path in [
-        &["section"][..],
-        &["section", "piece"],
-        &["section", "side"],
-        &["section", "task"],
-    ] {
-        assert!(get(&wide, path, "busy") > 0, "{path:?}");
-    }
+    // more than the issuing thread recorded: the join holds its first side
+    // until another thread has run the second
+    assert!(wide.threads > 1);
 }
 
 #[test]

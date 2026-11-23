@@ -271,7 +271,7 @@ impl<'s> Spawn<'s> for ScopeJob<'s> {
         let boxed = Box::new(TaskJob {
             scope: self as *const ScopeJob<'s>,
             task,
-            origin: Origin::queued(),
+            origin: Origin::here(),
         });
         self.shared.push(Job {
             data: Box::into_raw(boxed) as *const (),
@@ -363,7 +363,7 @@ impl Pool for Workers {
             done: AtomicUsize::new(0),
             out: AtomicUsize::new(0),
             panic: Mutex::new(None),
-            origin: Origin::queued(),
+            origin: Origin::here(),
         };
         let helper = Job {
             data: &job as *const RunJob<'_> as *const (),
@@ -394,7 +394,7 @@ impl Pool for Workers {
             f: Mutex::new(Some(b)),
             done: AtomicBool::new(false),
             panic: Mutex::new(None),
-            origin: Origin::queued(),
+            origin: Origin::here(),
         };
         let job = Job {
             data: &side as *const SideJob<'_> as *const (),
