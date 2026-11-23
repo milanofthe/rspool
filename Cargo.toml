@@ -18,7 +18,7 @@ rayon = ["dep:rayon"]
 rayon = { version = "1", optional = true }
 # Carries the caller's scope into the tasks and counts the sections; records
 # only in a binary that enables `rsprobe/on`.
-rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "8a2e758", version = "0.1.0" }
+rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "e1eeef9", version = "0.1.0" }
 
 [lints.clippy]
 too_many_arguments = "allow"
