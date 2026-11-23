@@ -2,7 +2,7 @@
 //! which of a library's ways to run some work is fastest: all measured on
 //! the runs.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering::Relaxed};
 
 use crate::constants::{
     RATE_SAMPLE_EVERY, RATE_WEIGHT_DOWN, RATE_WEIGHT_UP, TUNE_ARMS, TUNE_BINS, TUNE_BIN_BASE_NS,
@@ -16,7 +16,13 @@ use crate::{Dispatch, Piece, Place};
 /// The cost of an op is a prior until serial runs are measured (one in
 /// [`RATE_SAMPLE_EVERY`]), then their running mean; a section's work is its
 /// ops at that cost. A serial run inside which a section went wide (a call
-/// whose own work has wide sections) does not teach it.
+/// whose own work has wide sections) does not teach it. A measured wide run
+/// bounds it from above by the time its pieces ran, which is no less than a
+/// serial run's, as pieces side by side share the machine (caches, memory,
+/// cores): a higher cost moves down to it, the prior at once and a learned
+/// one at [`RATE_WEIGHT_DOWN`], and only a serial run makes the rate
+/// [`learned`](Self::learned). Work that only ever runs wide does not keep
+/// a prior that is too high.
 ///
 /// How wide a section runs is a [`Choice`] among widths (1, 2, 4, ...
 /// threads up to what is free here), an arm not yet measured counted at what
@@ -349,7 +355,7 @@ impl Rate {
     }
 
     /// Whether a serial run was measured: until then the cost of an op is
-    /// the prior.
+    /// the prior, or the bound of a wide run below it.
     pub fn learned(&self) -> bool {
         self.learned.load(Relaxed)
     }
@@ -376,6 +382,20 @@ impl Rate {
                 RATE_WEIGHT_DOWN,
                 RATE_WEIGHT_UP,
             );
+        }
+    }
+
+    /// The pieces of a wide run of `ops` ops ran `ns` ns in all: a bound on
+    /// the cost of an op from above (see [`Rate`]).
+    pub(crate) fn bound(&self, ns: f64, ops: f64) {
+        if ns > 0.0 && ops > 0.0 {
+            let seen = (ns / ops) as f32;
+            if !self.learned() {
+                // positive floats order as their bits do
+                self.ns.fetch_min(seen.to_bits(), Relaxed);
+            } else {
+                update(&self.ns, seen, RATE_WEIGHT_DOWN, 0.0);
+            }
         }
     }
 
@@ -612,9 +632,30 @@ impl<'r> Work<'r> {
     }
 
     /// The section as `n` pieces on `k` threads at the place `P`, measured
-    /// when [`go`](Self::go) asked for it ([`watch`](Self::watch)).
+    /// when [`go`](Self::go) asked for it, or sampled: the run's time
+    /// teaches the rate's arm for `k` threads ([`watch`](Self::watch)), and
+    /// for work of ops at the rate ([`of`](Self::of)) the time its pieces
+    /// ran, where none sent a section of its own wide, bounds the cost of an
+    /// op (see [`Rate`]).
     pub fn wide<P: Place>(&self, n: usize, k: usize, f: &Piece<'_>) {
-        self.watch::<P, _>(n, k, || P::run_width(n, k, f))
+        let Some((rate, pick)) = self.measuring(k) else {
+            return P::run_width(n, k, f);
+        };
+        let (busy, nested) = (AtomicU64::new(0), AtomicBool::new(false));
+        let timed = |i: usize| {
+            let (wide, t) = (crate::wide_count(), crate::clock::Instant::now());
+            f(i);
+            busy.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+            if crate::wide_count() != wide {
+                nested.store(true, Relaxed);
+            }
+        };
+        let t = crate::clock::Instant::now();
+        P::run_width(n, k, &timed);
+        self.teach(rate, pick, t.elapsed().as_nanos() as f64);
+        if self.ns.is_none() && !nested.into_inner() {
+            rate.bound(busy.into_inner() as f64, self.ops);
+        }
     }
 
     /// `f`, the section run wide on `k` threads at `P`: measured when
@@ -622,18 +663,27 @@ impl<'r> Work<'r> {
     /// rate's arm for `k` threads.
     pub fn watch<P: Place, R>(&self, pieces: usize, k: usize, f: impl FnOnce() -> R) -> R {
         let _ = pieces;
-        let Some(rate) = self.rate else {
+        let Some((rate, pick)) = self.measuring(k) else {
             return f();
         };
-        let next = self.take_next();
-        if next.is_none() && !rate.sample(self.ops) {
-            return f();
-        }
         let t = crate::clock::Instant::now();
         let r = f();
-        let pick = next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k)));
         self.teach(rate, pick, t.elapsed().as_nanos() as f64);
         r
+    }
+
+    /// The rate and the pick a wide run on `k` threads is measured as, if
+    /// [`go`](Self::go) asked for it or the run is sampled.
+    fn measuring(&self, k: usize) -> Option<(&'r Rate, Pick)> {
+        let rate = self.rate?;
+        let next = self.take_next();
+        if next.is_none() && !rate.sample(self.ops) {
+            return None;
+        }
+        Some((
+            rate,
+            next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k))),
+        ))
     }
 
     /// The run of `pick` took `ns` ns: `rate`'s widths learn it. At the
