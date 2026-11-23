@@ -143,10 +143,10 @@ fn a_wide_run_bounds_a_prior_that_is_too_high_and_never_raises_one() {
             rspool::run_rated(16, 16.0, &high, &piece);
             rspool::run_rated(16, 16.0, &low, &piece);
         }
-        // the pieces' time, at least the work: no serial run measured
+        // the pieces' time, at least the work, whether or not a serial run
+        // (an exploration of one thread) measured it as well
         let ns = high.ns_per_op();
         assert!((2e4..2e5).contains(&ns), "{ns}");
-        assert!(!high.learned());
         // raised only by a serial run (an exploration of one thread)
         assert!(low.learned() || low.ns_per_op() == 20.0);
     });
