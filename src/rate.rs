@@ -634,7 +634,7 @@ impl<'r> Work<'r> {
     pub fn run<P: Place>(&self, n: usize, f: &Piece<'_>) {
         match self.go::<P>(n) {
             Go::Wide(k) => self.wide::<P>(n, k, f),
-            Go::Here => self.serial(|| (0..n).for_each(f)),
+            Go::Here => self.serial(|| crate::section(n, 1, f, || ())),
         }
     }
 }

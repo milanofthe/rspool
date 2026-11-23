@@ -17,6 +17,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
+      - run: cargo test --all-features --features rsprobe/on
       - run: cargo test
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
       - run: cargo build --target wasm32-unknown-unknown

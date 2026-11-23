@@ -6,7 +6,9 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-use crate::{current, lent_run, lock, share, Dispatch, Lent, Piece, Place, Rate, Work};
+use crate::{
+    current, lent_run, lock, section, share, Dispatch, Lent, Origin, Piece, Place, Rate, Work,
+};
 
 /// The lent pool, or the current rayon pool where none is.
 pub struct Rayon;
@@ -97,7 +99,7 @@ impl Place for Rayon {
 
     fn run_width(n: usize, k: usize, f: &Piece<'_>) {
         if n < 2 || k < 2 {
-            return (0..n).for_each(f);
+            return section(n, 1, f, || ());
         }
         match current() {
             Some(l) => lent_run(&l, n, k, f),
@@ -192,16 +194,12 @@ pub fn width_on(threads: usize, work: f64, pieces: usize) -> usize {
 fn rayon_run(n: usize, k: usize, f: &Piece<'_>) {
     let cap = share(::rayon::current_num_threads());
     let k = k.min(n).min(cap).max(1);
-    if k < 2 {
-        return (0..n).for_each(f);
-    }
-    crate::WIDE.with(|w| w.set(w.get() + 1));
     // Its pieces leave their sections the whole pool: rayon runs a nested
     // section's pieces only on threads that are free, so nothing is
     // oversubscribed, and a share would keep the threads a short piece
     // leaves behind from a long one's sections (a factorization's lookahead
     // ran its update on half the pool, 10 to 20 % slower on four threads).
-    rayon_pieces(n, k, 0, f)
+    section(n, k, f, || rayon_pieces(n, k, 0, f))
 }
 
 /// The pieces of a rayon section, each leaving its sections the share
@@ -209,20 +207,23 @@ fn rayon_run(n: usize, k: usize, f: &Piece<'_>) {
 fn rayon_pieces(n: usize, k: usize, inner: usize, f: &Piece<'_>) {
     use ::rayon::prelude::*;
     let lent: Option<&Lent> = None;
+    let origin = Origin::here();
     if k >= n {
         (0..n)
             .into_par_iter()
             .with_max_len(1)
-            .for_each(|i| crate::piece(lent, inner, || f(i)));
+            .for_each(|i| origin.run(|| crate::piece(lent, inner, || f(i))));
     } else {
         let next = AtomicUsize::new(0);
         (0..k).into_par_iter().with_max_len(1).for_each(|_| {
-            crate::piece(lent, inner, || loop {
-                let i = next.fetch_add(1, Relaxed);
-                if i >= n {
-                    break;
-                }
-                f(i);
+            origin.run(|| {
+                crate::piece(lent, inner, || loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    f(i);
+                })
             })
         });
     }

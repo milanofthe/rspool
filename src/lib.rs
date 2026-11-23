@@ -26,6 +26,14 @@
 //! Where nothing is lent, sections run serially ([`width`], [`run`] and
 //! the rest of the crate root), or on the current rayon pool for code that
 //! asks for that ([`rayon`], feature `rayon`).
+//!
+//! A task that runs outside the call that issued it (a section's helper, a
+//! side of a `join` or a task of a `scope` taken from a queue, a rayon piece
+//! on another thread) runs with the issuing thread's current [`rsprobe`]
+//! node entered, so its scopes and counts land under that node and its time
+//! in the node's `busy`. Every section counts at the current node, at level
+//! DEBUG: `sections`, `width` (the threads it ran on, one for a serial one)
+//! and `serial`.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -79,6 +87,68 @@ thread_local! {
     pub(crate) static WIDE: Cell<u64> = const { Cell::new(0) };
     /// Pieces of sections this thread is running.
     static IN_PIECE: Cell<u32> = const { Cell::new(0) };
+    /// Its address tells this thread from the others ([`Origin`]).
+    static MARK: u8 = const { 0 };
+}
+
+/// This thread among the live ones (never zero).
+fn mark() -> usize {
+    MARK.with(|m| m as *const u8 as usize)
+}
+
+/// Where a task was issued: the current rsprobe node there, and the thread
+/// on which the task runs inside the issuing call, if any (`0`: none).
+#[derive(Clone, Copy)]
+pub(crate) struct Origin {
+    node: rsprobe::Handle,
+    inline: usize,
+}
+
+impl Origin {
+    /// A task queued to a pool: whichever thread takes it from the queue
+    /// is outside the issuing call, the issuing one included.
+    pub(crate) fn queued() -> Origin {
+        Origin {
+            node: rsprobe::current(),
+            inline: 0,
+        }
+    }
+
+    /// A task this thread may run inside the issuing call (a rayon piece).
+    #[cfg(feature = "rayon")]
+    pub(crate) fn here() -> Origin {
+        Origin {
+            node: rsprobe::current(),
+            inline: mark(),
+        }
+    }
+
+    /// `f`, with the issuing node entered unless this thread runs it
+    /// inside the issuing call.
+    pub(crate) fn run<R>(self, f: impl FnOnce() -> R) -> R {
+        if self.inline == mark() {
+            return f();
+        }
+        let _node = self.node.enter();
+        f()
+    }
+}
+
+/// The section `f(i)` for `i` in `0..n` on `k` threads, the width final:
+/// serially for `k < 2`, else through `wide`. Counted afterwards at the
+/// current rsprobe node.
+pub(crate) fn section(n: usize, k: usize, f: &Piece<'_>, wide: impl FnOnce()) {
+    if k < 2 {
+        (0..n).for_each(f);
+    } else {
+        WIDE.with(|w| w.set(w.get() + 1));
+        wide();
+    }
+    rsprobe::add!(DEBUG, "sections", 1);
+    rsprobe::add!(DEBUG, "width", k);
+    if k < 2 {
+        rsprobe::add!(DEBUG, "serial", 1);
+    }
 }
 
 /// Run `f` with `pool` lent: the sections `f` opens run on it, as wide as
@@ -233,7 +303,7 @@ impl Place for Here {
     fn run_width(n: usize, k: usize, f: &Piece<'_>) {
         match current() {
             Some(l) if n >= 2 && k >= 2 => lent_run(&l, n, k, f),
-            _ => (0..n).for_each(f),
+            _ => section(n, 1, f, || ()),
         }
     }
 }
@@ -242,12 +312,10 @@ impl Place for Here {
 pub(crate) fn lent_run(l: &Lent, n: usize, k: usize, f: &Piece<'_>) {
     let cap = share(l.pool.threads());
     let k = k.min(n).min(cap).max(1);
-    if k < 2 {
-        return (0..n).for_each(f);
-    }
     let inner = (cap / k).max(1);
-    WIDE.with(|w| w.set(w.get() + 1));
-    l.pool.run_width(n, k, &|i| piece(Some(l), inner, || f(i)));
+    section(n, k, f, || {
+        l.pool.run_width(n, k, &|i| piece(Some(l), inner, || f(i)))
+    });
 }
 
 /// The threads of the lent pool this thread may use: all of them, or in a
