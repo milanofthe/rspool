@@ -17,8 +17,12 @@ use crate::{Dispatch, Piece, Place};
 /// [`RATE_SAMPLE_EVERY`]), then their running mean; a section's work is its
 /// ops at that cost. A serial run inside which a section went wide (a call
 /// whose own work has wide sections) does not teach it. A measured wide run
-/// bounds it from above by the time its pieces ran ([`bound`](Self::bound)):
-/// work that only ever runs wide does not keep a prior that is too high.
+/// bounds it from above by the time its pieces ran, which is no less than a
+/// serial run's, as pieces side by side share the machine (caches, memory,
+/// cores): a higher cost moves down to it, the prior at once and a learned
+/// one at [`RATE_WEIGHT_DOWN`], and only a serial run makes the rate
+/// [`learned`](Self::learned). Work that only ever runs wide does not keep
+/// a prior that is too high.
 ///
 /// How wide a section runs is a [`Choice`] among widths (1, 2, 4, ...
 /// threads up to what is free here), an arm not yet measured counted at what
@@ -381,12 +385,8 @@ impl Rate {
         }
     }
 
-    /// The pieces of a wide run of `ops` ops ran `ns` ns in all: no less
-    /// than a serial run would, as pieces side by side share the machine
-    /// (caches, memory, cores), so a bound on the cost of an op. A higher
-    /// cost moves down to it, the prior at once and a learned one at
-    /// [`RATE_WEIGHT_DOWN`]; it never moves up, and only a serial run makes
-    /// the rate [`learned`](Self::learned).
+    /// The pieces of a wide run of `ops` ops ran `ns` ns in all: a bound on
+    /// the cost of an op from above (see [`Rate`]).
     pub(crate) fn bound(&self, ns: f64, ops: f64) {
         if ns > 0.0 && ops > 0.0 {
             let seen = (ns / ops) as f32;
@@ -636,7 +636,7 @@ impl<'r> Work<'r> {
     /// teaches the rate's arm for `k` threads ([`watch`](Self::watch)), and
     /// for work of ops at the rate ([`of`](Self::of)) the time its pieces
     /// ran, where none sent a section of its own wide, bounds the cost of an
-    /// op ([`Rate::bound`]).
+    /// op (see [`Rate`]).
     pub fn wide<P: Place>(&self, n: usize, k: usize, f: &Piece<'_>) {
         let Some((rate, pick)) = self.measuring(k) else {
             return P::run_width(n, k, f);
