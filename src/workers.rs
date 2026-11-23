@@ -375,11 +375,21 @@ impl Pool for Workers {
             sh.push(helper);
         }
         job.take();
+        // From here on this thread waits for its helpers: `wait` at the
+        // current rsprobe node, the clock read only where it is recorded.
+        let mut waiting = None;
+        rsprobe::time!(DEBUG, "wait", {
+            waiting = Some(crate::clock::Instant::now());
+            0
+        });
         // Every piece is taken: the helpers nobody started come back.
         while job.out.load(SeqCst) > 0 && sh.retract(helper) {
             job.out.fetch_sub(1, SeqCst);
         }
         sh.wait_until(|| job.done.load(SeqCst) == n && job.out.load(SeqCst) == 0);
+        if let Some(t) = waiting {
+            rsprobe::time!(DEBUG, "wait", t.elapsed().as_nanos());
+        }
         resume(job.panic);
     }
 

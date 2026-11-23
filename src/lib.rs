@@ -33,7 +33,12 @@
 //! node entered, so its scopes and counts land under that node and its time
 //! in the node's `busy`. Every section counts at the current node, at level
 //! DEBUG: `sections`, `width` (the threads it ran on, one for a serial one)
-//! and `serial`.
+//! and `serial`; a section of rated work (a [`Work`] with a [`Rate`]) also
+//! `explored` where it ran on another width than the fastest to measure it,
+//! and where it was measured, the times `predicted` (its work as estimated),
+//! `measured` and, explored, `exploring`. A wide section on [`Workers`] adds
+//! `wait`, the time the calling thread waits for its helpers after its own
+//! pieces.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
