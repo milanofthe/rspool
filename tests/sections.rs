@@ -123,6 +123,36 @@ fn a_piece_leaves_its_sections_its_share_of_the_pool() {
 }
 
 #[test]
+fn a_wide_run_bounds_a_prior_that_is_too_high_and_never_raises_one() {
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = Lent {
+        dispatch: Dispatch::free(4),
+        pool: w,
+    };
+    rspool::install_lent(lent, || {
+        // 16 pieces of 20 us, one op each: 20 us per op, the priors a
+        // thousand times above and below
+        let piece = |_: usize| {
+            let t = std::time::Instant::now();
+            while t.elapsed() < std::time::Duration::from_micros(20) {
+                std::hint::spin_loop();
+            }
+        };
+        let (high, low) = (Rate::new(2e7), Rate::new(20.0));
+        for _ in 0..4 {
+            rspool::run_rated(16, 16.0, &high, &piece);
+            rspool::run_rated(16, 16.0, &low, &piece);
+        }
+        // the pieces' time, at least the work: no serial run measured
+        let ns = high.ns_per_op();
+        assert!((2e4..2e5).contains(&ns), "{ns}");
+        assert!(!high.learned());
+        // raised only by a serial run (an exploration of one thread)
+        assert!(low.learned() || low.ns_per_op() == 20.0);
+    });
+}
+
+#[test]
 fn a_run_with_a_wide_section_inside_teaches_its_rate_nothing() {
     let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
     let lent = Lent {
