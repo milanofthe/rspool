@@ -178,6 +178,53 @@ fn every_section_counts_its_width_at_the_current_node() {
     assert_eq!(get(&info.record(), &[], "sections"), 0);
 }
 
+/// Whether node `i` has measure `m`, and its kind (`true` exact).
+fn kind(r: &Record, path: &[&str], m: &str) -> Option<bool> {
+    let i = r.find(path)? as usize;
+    r.nodes[i].values.iter().find(|v| v.0 == m)?;
+    r.measures.iter().find(|x| x.0 == m).map(|x| x.1)
+}
+
+#[test]
+fn a_rated_section_records_what_its_width_was_chosen_on() {
+    let pool: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let lent = rspool::Lent {
+        pool,
+        dispatch: rspool::Dispatch::free(4),
+    };
+    // 16 pieces of 5 us estimated at 80 ns in all: every narrower width
+    // could beat the measured one, so some sections explore
+    let (sections, rate) = (640, rspool::Rate::new(1.0));
+    let r = recorded(|| {
+        rspool::install_lent(lent, || {
+            let _s = scope!("section");
+            for _ in 0..sections {
+                let work = rspool::Work::estimated(80.0, 80.0, &rate);
+                work.run::<rspool::Here>(16, &|_| hold(Duration::from_micros(5), &|| false));
+            }
+        })
+    });
+    if !on() {
+        return;
+    }
+    let at = ["section"];
+    assert_eq!(get(&r, &at, "sections"), sections);
+    for m in ["predicted", "measured", "exploring", "wait"] {
+        assert_eq!(kind(&r, &at, m), Some(false), "{m}");
+    }
+    assert_eq!(kind(&r, &at, "explored"), Some(true));
+    // the estimate of every measured section, 80 ns, at least the first two
+    let predicted = get(&r, &at, "predicted");
+    assert!(
+        predicted >= 160 && predicted.is_multiple_of(80),
+        "{predicted}"
+    );
+    assert!(get(&r, &at, "measured") >= get(&r, &at, "exploring"));
+    let explored = get(&r, &at, "explored");
+    assert!(explored > 0 && explored < sections / 8, "{explored}");
+    assert!(get(&r, &at, "exploring") > 0);
+}
+
 #[test]
 fn without_a_current_context_nothing_is_recorded() {
     let ctx = Context::builder().threshold(Level::DEBUG).build();

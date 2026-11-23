@@ -11,7 +11,7 @@ A section that is not worth a second thread runs on the calling thread without t
 
 Without a lent pool, sections run serially, or on the current rayon pool for code that asks for it (feature `rayon`). On targets without a clock (wasm32), nothing is timed and sections decide on their priors.
 
-A task carries its issuer's [rsprobe](https://github.com/milanofthe/rsprobe) scope, and every section counts its width there at level DEBUG.
+A task carries its issuer's [rsprobe](https://github.com/milanofthe/rsprobe) scope, and every section counts its width there at level DEBUG, with what its width was chosen on: the work as estimated and the time measured, the explorations, and the caller's wait for its helpers.
 rspool depends on rsprobe without features; a binary that wants a record enables `rsprobe/on` itself.
 
 ## License

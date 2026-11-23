@@ -99,6 +99,8 @@ pub struct Pick {
     pub option: usize,
     bin: usize,
     measure: bool,
+    /// Taken instead of the fastest, to measure it.
+    explored: bool,
 }
 
 impl Pick {
@@ -185,6 +187,7 @@ impl Choice {
                 option: 0,
                 bin: b,
                 measure: false,
+                explored: false,
             };
         };
         // exploring: the nearest option that could beat the fastest, below
@@ -211,6 +214,7 @@ impl Choice {
             option,
             bin: b,
             measure,
+            explored: option != best,
         }
     }
 
@@ -244,6 +248,7 @@ impl Choice {
             option,
             bin: bin(work),
             measure: true,
+            explored: false,
         }
     }
 
@@ -543,6 +548,9 @@ impl<'r> Work<'r> {
         if pick.measure {
             NEXT.with(|c| c.set(Some((rate.key(), pick))));
         }
+        if pick.explored {
+            rsprobe::add!(DEBUG, "explored", 1);
+        }
         match arms[pick.option] {
             k if k >= 2 => Go::Wide(k),
             _ => Go::Here,
@@ -577,7 +585,7 @@ impl<'r> Work<'r> {
                 rate.learn(ns, self.ops);
             }
             let pick = next.map_or(Choice::at(self.time(), 0), |n| Pick { option: 0, ..n });
-            rate.widths.record(pick, ns, self.ops);
+            self.teach(rate, pick, ns);
         }
         r
     }
@@ -599,7 +607,7 @@ impl<'r> Work<'r> {
     pub fn record_serial(&self, t: SerialRun) {
         let ns = t.start.elapsed().as_nanos() as f64;
         if let Some(rate) = self.rate.filter(|_| crate::wide_count() == t.wide) {
-            rate.widths.record(t.pick, ns, self.ops);
+            self.teach(rate, t.pick, ns);
         }
     }
 
@@ -624,9 +632,21 @@ impl<'r> Work<'r> {
         let t = crate::clock::Instant::now();
         let r = f();
         let pick = next.unwrap_or_else(|| Choice::at(self.time(), arm_of(k)));
-        rate.widths
-            .record(pick, t.elapsed().as_nanos() as f64, self.ops);
+        self.teach(rate, pick, t.elapsed().as_nanos() as f64);
         r
+    }
+
+    /// The run of `pick` took `ns` ns: `rate`'s widths learn it. At the
+    /// current rsprobe node, at level DEBUG: the work as estimated
+    /// (`predicted`), the time (`measured`), and the time of an
+    /// exploration (`exploring`).
+    fn teach(&self, rate: &Rate, pick: Pick, ns: f64) {
+        rate.widths.record(pick, ns, self.ops);
+        rsprobe::time!(DEBUG, "predicted", self.time());
+        rsprobe::time!(DEBUG, "measured", ns);
+        if pick.explored {
+            rsprobe::time!(DEBUG, "exploring", ns);
+        }
     }
 
     /// The section, `n` pieces of this work: serially or on as many threads
