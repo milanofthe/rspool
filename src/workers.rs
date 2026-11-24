@@ -20,6 +20,9 @@ use crate::{lock, Dispatch, Origin, Pool, Spawn};
 /// the workers keep looking for [`SPIN`] (as OpenMP's active wait), then
 /// sleep until work comes; so the stages of a solve, a few tens of
 /// microseconds apart, reach awake workers, and an idle pool costs nothing.
+/// A sleeping worker is woken only for work the workers looking for it do
+/// not cover, so a pool wider than its sections keeps about as many
+/// workers awake as the sections take.
 pub struct Workers {
     shared: Arc<Shared>,
     threads: usize,
@@ -55,6 +58,9 @@ struct Shared {
     queued: AtomicUsize,
     shutdown: AtomicBool,
     spin: std::time::Duration,
+    /// Workers awake and looking for work, neither running a job nor
+    /// asleep.
+    spinning: AtomicUsize,
     /// Sleeping workers, waiting on `wake` for work.
     sleepers: AtomicUsize,
     sleep: Mutex<()>,
@@ -80,11 +86,16 @@ impl Shared {
 
     fn push(&self, job: Job) {
         lock(&self.queues[self.own()]).push_back(job);
-        self.queued.fetch_add(1, SeqCst);
-        // Queued, then look: a worker going to sleep either is seen here or
-        // sees the job (both sequentially consistent); it waits holding the
-        // lock from its look on, so the notice reaches it.
-        if self.sleepers.load(SeqCst) > 0 {
+        // wrapping: a thread may take the job and count it out before it
+        // is counted in here
+        let queued = self.queued.fetch_add(1, SeqCst).wrapping_add(1);
+        // Queued, then look: a worker going to sleep either is seen here
+        // (spinning, or asleep) or sees the job (all sequentially
+        // consistent); it waits holding the lock from its look on, so the
+        // notice reaches it. A sleeper is woken only for the jobs the
+        // spinning workers do not cover: woken for every job, a pool wider
+        // than its sections kept all its workers spinning.
+        if self.spinning.load(SeqCst) < queued && self.sleepers.load(SeqCst) > 0 {
             let _g = lock(&self.sleep);
             self.wake.notify_one();
         }
@@ -142,13 +153,16 @@ impl Shared {
         WORKER.with(|w| w.set(Some((self as *const Shared, k))));
         let mut since = std::time::Instant::now();
         let mut idle = 0u32;
+        self.spinning.fetch_add(1, SeqCst);
         loop {
             if self.shutdown.load(SeqCst) {
                 return;
             }
             if let Some(job) = self.find() {
+                self.spinning.fetch_sub(1, SeqCst);
                 // SAFETY: a queued job's section waits for it.
                 unsafe { job.execute() };
+                self.spinning.fetch_add(1, SeqCst);
                 since = std::time::Instant::now();
                 continue;
             }
@@ -163,11 +177,13 @@ impl Shared {
             }
             // Announce, then look (see `push`).
             let mut g = lock(&self.sleep);
+            self.spinning.fetch_sub(1, SeqCst);
             self.sleepers.fetch_add(1, SeqCst);
             while self.queued.load(SeqCst) == 0 && !self.shutdown.load(SeqCst) {
                 g = self.wake.wait(g).unwrap_or_else(|e| e.into_inner());
             }
             self.sleepers.fetch_sub(1, SeqCst);
+            self.spinning.fetch_add(1, SeqCst);
             drop(g);
             since = std::time::Instant::now();
         }
@@ -311,6 +327,7 @@ impl Workers {
             queued: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             spin,
+            spinning: AtomicUsize::new(0),
             sleepers: AtomicUsize::new(0),
             sleep: Mutex::new(()),
             wake: Condvar::new(),

@@ -1,5 +1,6 @@
-//! The workers: every piece once, awake or woken; sections nest; threads outside the
-//! pool share it; panics reach the section that waits.
+//! The workers: every piece once, awake or woken; a section gets its width;
+//! sections nest; threads outside the pool share it; panics reach the
+//! section that waits.
 
 #[test]
 fn workers_run_every_piece_once_awake_or_woken() {
@@ -117,4 +118,33 @@ fn a_panic_in_a_task_or_a_side_reaches_its_section() {
         n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     });
     assert_eq!(n.into_inner(), 8);
+}
+
+#[test]
+fn a_section_runs_on_its_width_whether_the_workers_spin_or_sleep() {
+    // Every piece waits until all pieces of its section run at once: a
+    // section of width k on a pool wider than k gets k threads, from workers
+    // asleep (no spin) and from workers spinning after earlier sections.
+    use rspool::{Pool, Workers};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    for spin in [Duration::ZERO, Duration::from_millis(50)] {
+        let w = Workers::with_spin(8, spin);
+        for round in 0..100 {
+            let width = 2 + round % 3;
+            let here = AtomicUsize::new(0);
+            let together = AtomicUsize::new(0);
+            w.run_width(width, width, &|_| {
+                here.fetch_add(1, Ordering::SeqCst);
+                let t = Instant::now();
+                while here.load(Ordering::SeqCst) < width && t.elapsed() < Duration::from_secs(5) {
+                    std::hint::spin_loop();
+                }
+                if here.load(Ordering::SeqCst) == width {
+                    together.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            assert_eq!(together.into_inner(), width, "spin {spin:?}, round {round}");
+        }
+    }
 }
