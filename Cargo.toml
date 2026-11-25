@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 authors = ["Milan Rother"]
 repository = "https://github.com/milanofthe/rspool"
-description = "One set of worker threads several libraries share, and sections that go as wide as their work is worth on them: measured section costs, learned rates."
+description = "One set of worker threads several libraries share, and sections that go as wide as their work is worth on them: the caller's estimate of the work against the measured section cost."
 keywords = ["parallel", "thread-pool", "scheduling", "work-stealing"]
 categories = ["concurrency"]
 
@@ -18,7 +18,7 @@ rayon = ["dep:rayon"]
 rayon = { version = "1", optional = true }
 # Carries the caller's scope into the tasks and counts the sections; records
 # only in a binary that enables `rsprobe/on`.
-rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "c2269fe", version = "0.1.0" }
+rsprobe = { git = "https://github.com/milanofthe/rsprobe", rev = "d11d43db0", version = "0.1.0" }
 
 [lints.clippy]
 too_many_arguments = "allow"

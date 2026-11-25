@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rspool::{Pool, Serial, Spawn, Workers};
+use rspool::{Here, Place, Pool, Serial, Spawn, Workers};
 use rsprobe::{add, scope, Context, Level, Record};
 
 /// Whether rsprobe records in this build.
@@ -151,12 +151,12 @@ fn every_section_counts_its_width_at_the_current_node() {
     let r = recorded(|| {
         rspool::install_lent(lent, || {
             let _s = scope!("section");
-            rspool::run_width(16, 4, &|_| ());
-            rspool::run_width(16, 1, &|_| ());
+            Here::run_width(16, 4, &|_| ());
+            Here::run_width(16, 1, &|_| ());
             // two pieces of a pool of four leave each piece two threads
-            rspool::run_width(2, 2, &|_| {
+            Here::run_width(2, 2, &|_| {
                 let _p = scope!("piece");
-                rspool::run_width(8, 2, &|_| ());
+                Here::run_width(8, 2, &|_| ());
             });
         })
     });
@@ -173,7 +173,7 @@ fn every_section_counts_its_width_at_the_current_node() {
     let info = Context::new();
     {
         let _c = info.enter();
-        rspool::run_width(16, 1, &|_| ());
+        Here::run_width(16, 1, &|_| ());
     }
     assert_eq!(get(&info.record(), &[], "sections"), 0);
 }
@@ -186,21 +186,18 @@ fn kind(r: &Record, path: &[&str], m: &str) -> Option<bool> {
 }
 
 #[test]
-fn a_rated_section_records_what_its_width_was_chosen_on() {
+fn a_wide_section_on_workers_records_the_callers_wait() {
     let pool: Arc<dyn Pool> = Arc::new(Workers::new(4));
     let lent = rspool::Lent {
         pool,
         dispatch: rspool::Dispatch::free(4),
     };
-    // 16 pieces of 5 us estimated at 80 ns in all: every narrower width
-    // could beat the measured one, so some sections explore
-    let (sections, rate) = (640, rspool::Rate::new(1.0));
     let r = recorded(|| {
         rspool::install_lent(lent, || {
             let _s = scope!("section");
-            for _ in 0..sections {
-                let work = rspool::Work::estimated(80.0, 80.0, &rate);
-                work.run::<rspool::Here>(16, &|_| hold(Duration::from_micros(5), &|| false));
+            for _ in 0..16 {
+                rspool::Work::ns(80.0)
+                    .run::<Here>(16, &|_| hold(Duration::from_micros(5), &|| false));
             }
         })
     });
@@ -208,21 +205,9 @@ fn a_rated_section_records_what_its_width_was_chosen_on() {
         return;
     }
     let at = ["section"];
-    assert_eq!(get(&r, &at, "sections"), sections);
-    for m in ["predicted", "measured", "exploring", "wait"] {
-        assert_eq!(kind(&r, &at, m), Some(false), "{m}");
-    }
-    assert_eq!(kind(&r, &at, "explored"), Some(true));
-    // the estimate of every measured section, 80 ns, at least the first two
-    let predicted = get(&r, &at, "predicted");
-    assert!(
-        predicted >= 160 && predicted.is_multiple_of(80),
-        "{predicted}"
-    );
-    assert!(get(&r, &at, "measured") >= get(&r, &at, "exploring"));
-    let explored = get(&r, &at, "explored");
-    assert!(explored > 0 && explored < sections / 8, "{explored}");
-    assert!(get(&r, &at, "exploring") > 0);
+    assert_eq!(get(&r, &at, "sections"), 16);
+    assert_eq!(get(&r, &at, "width"), 16 * 4);
+    assert_eq!(kind(&r, &at, "wait"), Some(false));
 }
 
 #[test]
@@ -231,8 +216,8 @@ fn without_a_current_context_nothing_is_recorded() {
     let w = Workers::new(4);
     work(&w);
     rspool::install(Arc::new(Workers::new(4)), || {
-        rspool::run_width(16, 4, &|_| ());
-        rspool::run(16, f64::INFINITY, &|_| ());
+        Here::run_width(16, 4, &|_| ());
+        rspool::Work::ns(f64::INFINITY).run::<Here>(16, &|_| ());
     });
     let r = ctx.record();
     assert_eq!(r.nodes.len(), 1);

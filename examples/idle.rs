@@ -389,7 +389,7 @@ fn main() {
                     #[cfg(feature = "rayon")]
                     rspool::rayon::run_width(pieces, width, &f);
                 } else {
-                    rspool::run_width(pieces, width, &f);
+                    <rspool::Here as rspool::Place>::run_width(pieces, width, &f);
                 }
             }
             let section_s = s.elapsed().as_secs_f64();

@@ -1,7 +1,6 @@
 //! A monotonic clock that is inert where there is none: on
 //! wasm32-unknown-unknown `std::time::Instant::now()` panics, so there every
-//! instant reads zero time. Rates learn nothing there, and sections decide on
-//! their priors; nothing traps.
+//! instant reads zero time. Nothing is timed there, and nothing traps.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use std::time::Instant;

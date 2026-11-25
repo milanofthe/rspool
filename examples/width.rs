@@ -1,12 +1,12 @@
 //! Sections of a fixed busy time on a pool of a given width, the work given
-//! as ops at a rate whose prior is right or a factor off; the widths the
-//! sections take follow from the rate's measurements. Writes the run's
+//! as ops at a rate that is right or a factor off; the widths the sections
+//! take follow from that estimate against the pool's section cost. Writes the run's
 //! rsprobe record (level DEBUG) to the file named by `RSPROBE_RECORD`.
 //!
 //!     cargo run --release --example width --features rsprobe/on -- \
 //!         THREADS FACTOR [SECTIONS PIECES SECTION_US GAP_US]
 //!
-//! FACTOR is the prior over the true cost of an op (1: right, 100: a
+//! FACTOR is the rate over the true cost of an op (1: right, 100: a
 //! hundred times too high); GAP_US the serial work between sections.
 
 use std::hint::spin_loop;
