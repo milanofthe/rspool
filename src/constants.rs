@@ -3,13 +3,13 @@
 //!
 //! No value here is a fact about one machine: what a section costs is
 //! measured on the pool that runs it ([`Dispatch::measure`](
-//! crate::Dispatch::measure)), and what an op costs is learned from the runs
-//! ([`Rate`](crate::Rate)). The values below are margins, budgets of the
-//! measurement, and priors for pools that do not measure themselves.
+//! crate::Dispatch::measure)), and what an op costs is the caller's
+//! estimate ([`Rate`](crate::Rate)). The values below are margins, budgets
+//! of the measurement, and priors for pools that do not measure themselves.
 
 /// A section goes wide only if that saves at least this fraction of its
 /// serial time ([`Dispatch::width`](crate::Dispatch::width)): margin for
-/// the scatter of the measured costs and the learned rates, so that a
+/// the scatter of the measured costs and the callers' estimates, so that a
 /// section near break-even stays serial instead of flipping between the two.
 pub const GAIN: f64 = 0.2;
 
@@ -28,8 +28,7 @@ pub const ASSUMED_HELPER_NS: f64 = 1_000.0;
 /// on 12 Linux cores, 20 pools of 12 workers each, the median cost of a
 /// section on all of them was 16.0, 18.8, 17.6 and 16.0 us for 8, 16, 32
 /// and 64 rounds, from pool to pool a factor of two to four apart at any
-/// of them, while building a pool took 1.2, 2.3, 4.1 and 7.3 ms. The cost
-/// is a prior: the widths a section takes are measured on its runs.
+/// of them, while building a pool took 1.2, 2.3, 4.1 and 7.3 ms.
 pub const CALIBRATION_ROUNDS: usize = 16;
 /// How long each piece of a calibration section is busy, in ns: long
 /// enough for an awake pool's threads to take their pieces before the
@@ -41,41 +40,6 @@ pub const CALIBRATION_PIECE_NS: u64 = 5_000;
 /// pays the hand-over of a piece's output a real section pays, not only the
 /// queue's.
 pub const CALIBRATION_LINES: usize = 8;
-
-/// A [`Rate`](crate::Rate) measures one in this many of its runs: two
-/// clock reads, a few ns a run on average even for the smallest sections,
-/// whose rate decides as much as a large one's.
-pub const RATE_SAMPLE_EVERY: u32 = 16;
-/// The weight of a new measurement in a rate's running mean toward less
-/// time: interruptions only ever add time to a run, so the mean follows a
-/// faster run at once and a slower one only as they keep coming
-/// ([`RATE_WEIGHT_UP`]).
-pub const RATE_WEIGHT_DOWN: f32 = 0.5;
-/// See [`RATE_WEIGHT_DOWN`].
-pub const RATE_WEIGHT_UP: f32 = 0.1;
-
-/// The sizes a [`Rate`](crate::Rate) keeps its measured widths apart for:
-/// bins of work this factor apart, the first from this many ns. A small
-/// section pays a wide run's fixed costs on less work than a large one of
-/// the same kind, so each size learns its own best width.
-pub const TUNE_BIN_FACTOR: f64 = 4.0;
-/// See [`TUNE_BIN_FACTOR`].
-pub const TUNE_BIN_BASE_NS: f64 = 250.0;
-/// See [`TUNE_BIN_FACTOR`]: 250 ns to about a minute.
-pub const TUNE_BINS: usize = 14;
-/// The widths a [`Rate`](crate::Rate) measures: 1, 2, 4, ... threads, this
-/// many, the last capped at what is free (up to 128 threads apart).
-pub const TUNE_ARMS: usize = 8;
-/// One in this many sections runs on a neighbouring width instead of the
-/// best measured one, measured: a change in the code or the machine is
-/// followed, for a percent or two of the time.
-pub const TUNE_EXPLORE: u32 = 64;
-/// The weight of a new measurement in a width's time per op toward less
-/// time and toward more: interruptions only ever add time, so a faster run
-/// counts at once and slower ones as they keep coming.
-pub const TUNE_WEIGHT_DOWN: f32 = 0.5;
-/// See [`TUNE_WEIGHT_DOWN`].
-pub const TUNE_WEIGHT_UP: f32 = 0.25;
 
 /// Pieces of work per thread a section of many items is cut into
 /// ([`piece_len`](crate::piece_len)): about four balance items of unequal

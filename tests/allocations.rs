@@ -44,8 +44,7 @@ fn deciding_a_section_allocates_nothing() {
     let r = Rate::new(1.0);
     let decide = |ops: f64| {
         let work = Work::of(ops, &r);
-        let go = work.go::<Here>(64);
-        work.serial(|| std::hint::black_box(go));
+        std::hint::black_box(work.go::<Here>(64));
     };
     // no pool lent
     assert_eq!(allocs(|| decide(1e3)), 0, "without a pool");

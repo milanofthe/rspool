@@ -8,12 +8,12 @@
 //! sections ([`Workers`]), instead of pools competing for the cores.
 //!
 //! A section runs on as many threads as its work is worth, one included:
-//! its work in ns (a count of ops at a [`Rate`] learned from the runs)
-//! against what a section costs the pool on `k` threads (its [`Dispatch`],
-//! which [`Workers`] measure when they start). A section not worth a second
-//! thread runs on the calling thread without touching the pool, so small
-//! work stays serial and large work goes wide on any machine, with no
-//! threshold tuned to one.
+//! its work in ns as the caller estimates it (a count of ops at a [`Rate`],
+//! or ns, a [`Work`]) against what a section costs the pool on `k` threads
+//! (its [`Dispatch`], which [`Workers`] measure when they start). A section
+//! not worth a second thread runs on the calling thread without touching
+//! the pool, so small work stays serial and large work goes wide on any
+//! machine, with no threshold tuned to one.
 //!
 //! A section on `k` threads leaves the sections its pieces open the pool's
 //! threads over `k` ([`width`]): inside a section as wide as the pool,
@@ -23,7 +23,7 @@
 //! Every result is the same however a section runs: no piece's arithmetic
 //! may depend on how its pieces are scheduled or how many threads run them.
 //!
-//! Where nothing is lent, sections run serially ([`width`], [`run`] and
+//! Where nothing is lent, sections run serially ([`width`], [`Here`] and
 //! the rest of the crate root), or on the current rayon pool for code that
 //! asks for that ([`rayon`], feature `rayon`).
 //!
@@ -33,12 +33,8 @@
 //! node entered, so its scopes and counts land under that node and its time
 //! in the node's `busy`. Every section counts at the current node, at level
 //! DEBUG: `sections`, `width` (the threads it ran on, one for a serial one)
-//! and `serial`; a section of rated work (a [`Work`] with a [`Rate`]) also
-//! `explored` where it ran on another width than the fastest to measure it,
-//! and where it was measured, the times `predicted` (its work as estimated),
-//! `measured` and, explored, `exploring`. A wide section on [`Workers`] adds
-//! `wait`, the time the calling thread waits for its helpers after its own
-//! pieces.
+//! and `serial`. A wide section on [`Workers`] adds `wait`, the time the
+//! calling thread waits for its helpers after its own pieces.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -56,7 +52,7 @@ pub use clock::Instant;
 pub use constants::{GAIN, PIECES_PER_WORKER, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use rate::{draw, Choice, Go, Pick, Prior, Rate, SerialRun, Timing, Work};
+pub use rate::{Go, Rate, Work};
 pub use workers::Workers;
 
 /// `m` locked: a lock is poisoned only by a panic its section carries on.
@@ -87,9 +83,6 @@ thread_local! {
     /// share of an enclosing section (`0`: no section encloses it, the
     /// whole pool).
     static SHARE: Cell<usize> = const { Cell::new(0) };
-    /// Sections this thread sent wide: a measured run that sent one teaches
-    /// its rate nothing ([`Rate::end`]).
-    pub(crate) static WIDE: Cell<u64> = const { Cell::new(0) };
     /// Pieces of sections this thread is running.
     static IN_PIECE: Cell<u32> = const { Cell::new(0) };
 }
@@ -120,7 +113,6 @@ pub(crate) fn section(n: usize, k: usize, f: &Piece<'_>, wide: impl FnOnce()) {
     if k < 2 {
         (0..n).for_each(f);
     } else {
-        WIDE.with(|w| w.set(w.get() + 1));
         wide();
     }
     rsprobe::add!(DEBUG, "sections", 1);
@@ -162,11 +154,6 @@ pub fn current() -> Option<Lent> {
 /// Whether a pool is lent on this thread (nothing taken or cloned).
 pub fn is_lent() -> bool {
     CURRENT.with(|c| c.borrow().is_some())
-}
-
-/// The sections this thread sent wide so far.
-pub(crate) fn wide_count() -> u64 {
-    WIDE.with(|w| w.get())
 }
 
 /// Whether this thread is running a piece of a section.
@@ -318,21 +305,8 @@ pub fn width(work: f64, pieces: usize) -> usize {
     Here::width(work, pieces)
 }
 
-/// Run `f(i)` for `i` in `0..n` on `k` threads of the lent pool (the
-/// calling one among them); serially for `k < 2` or where nothing is lent.
-pub fn run_width(n: usize, k: usize, f: &Piece<'_>) {
-    Here::run_width(n, k, f)
-}
-
-/// Run `n` pieces of `work` ns of work together: on as many threads as it
-/// is worth here ([`width`]), else serially on this thread.
-pub fn run(n: usize, work: f64, f: &Piece<'_>) {
-    run_width(n, width(work, n), f)
-}
-
 /// Run `n` pieces of `ops` ops at `rate` together, on as many threads as
-/// they are worth here; the rate learns from the serial runs (see
-/// [`Rate`]).
+/// they are worth here.
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Here>(n, f)
 }

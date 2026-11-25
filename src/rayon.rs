@@ -6,9 +6,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-use crate::{
-    current, lent_run, lock, section, share, Dispatch, Lent, Origin, Piece, Place, Rate, Work,
-};
+use crate::{current, lent_run, lock, section, share, Dispatch, Lent, Origin, Piece, Place};
 
 /// The lent pool, or the current rayon pool where none is.
 pub struct Rayon;
@@ -260,15 +258,4 @@ pub fn width(work: f64, pieces: usize) -> usize {
 /// Run `f(i)` for `i` in `0..n` on `k` threads here, serially for `k < 2`.
 pub fn run_width(n: usize, k: usize, f: &Piece<'_>) {
     Rayon::run_width(n, k, f)
-}
-
-/// Run `n` pieces of `work` ns together, on as many threads as it is worth
-/// here.
-pub fn run(n: usize, work: f64, f: &Piece<'_>) {
-    run_width(n, width(work, n), f)
-}
-
-/// Run `n` pieces of `ops` ops at `rate`, the rate learning from the runs.
-pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
-    Work::of(ops, rate).run::<Rayon>(n, f)
 }
