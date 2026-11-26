@@ -21,6 +21,11 @@ use crate::{Place, Work};
 /// ranges, so there is one per thread that claimed any. A range's result
 /// must not depend on what its state saw before (scratch, or a copy of a
 /// shared origin): which thread takes which range is not fixed.
+///
+/// An item is the smallest unit worth running alone: a range may hold a
+/// single one. A caller whose code works on groups (the lanes of a SIMD
+/// pass, the entries of a block) passes the groups as items, not their
+/// members.
 pub fn ranges_init<P: Place, S>(
     n: usize,
     work: Work<'_>,
