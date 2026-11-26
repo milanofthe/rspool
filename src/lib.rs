@@ -16,11 +16,11 @@
 //! machine, with no threshold tuned to one.
 //!
 //! A loop over `n` items ([`ranges_init`], and on it [`ranges`],
-//! [`chunks_mut`], [`map_init`], [`map`]) is such a section whose threads
-//! claim ranges of the items until none is left, each with a state of its
-//! own: the width and the length of the ranges both follow from the
-//! caller's estimate of the work ([`Dispatch::ranges`]). A section that
-//! writes several slices by range takes them as [`Disjoint`].
+//! [`chunks_mut`], [`map_init`], [`map`], [`map_owned`]) is such a section
+//! whose threads claim ranges of the items until none is left, each with a
+//! state of its own: the width and the length of the ranges both follow
+//! from the caller's estimate of the work ([`Dispatch::ranges`]). A section
+//! that writes several slices by range takes them as [`Disjoint`].
 //!
 //! A section on `k` threads leaves the sections its pieces open the pool's
 //! threads over `k` ([`width`]): inside a section as wide as the pool,
@@ -60,7 +60,7 @@ pub use clock::Instant;
 pub use constants::{GAIN, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use ranges::{chunks_mut, map, map_init, ranges, ranges_init, Disjoint};
+pub use ranges::{chunks_mut, map, map_init, map_owned, ranges, ranges_init, Disjoint};
 pub use rate::{Go, Rate, Work};
 pub use workers::Workers;
 
@@ -83,6 +83,7 @@ impl Lent {
         let dispatch = pool.dispatch();
         Lent { pool, dispatch }
     }
+
 }
 
 thread_local! {

@@ -106,6 +106,28 @@ pub fn map<P: Place, R: Send>(n: usize, work: Work<'_>, f: impl Fn(usize) -> R +
     map_init::<P, (), R>(n, work, || (), |_, i| f(i))
 }
 
+/// `f(item)` for every item of `items`, in their order, `work` all of them
+/// ([`map`]): each item is moved into `f` once. A panic of `f` reaches the
+/// caller as in [`map`]; the items not yet moved into `f` and the results
+/// made leak, the item of the `f` that panicked is dropped by its
+/// unwinding, and no item is dropped twice.
+pub fn map_owned<P: Place, A: Send, R: Send>(
+    items: Vec<A>,
+    work: Work<'_>,
+    f: impl Fn(A) -> R + Sync,
+) -> Vec<R> {
+    let mut items = items;
+    let n = items.len();
+    // SAFETY: no element is left to drop; the `n` items stay in the buffer, which `items` frees without dropping them.
+    unsafe { items.set_len(0) };
+    let left = Disjoint::new(&mut items.spare_capacity_mut()[..n]);
+    map::<P, R>(n, work, |i| {
+        // SAFETY: `map` calls this once per index of `0..n`, and the entry `i` holds an item not moved out before.
+        let item = unsafe { left.range(i..i + 1)[0].assume_init_read() };
+        f(item)
+    })
+}
+
 /// A slice the ranges of a section write, each its own entries: for a
 /// section that writes several slices at once ([`chunks_mut`] covers one).
 /// The one place disjoint writes of a section are unsafe.
