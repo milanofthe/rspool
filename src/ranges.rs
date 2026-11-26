@@ -96,8 +96,7 @@ pub fn map_init<P: Place, S, R: Send>(
             slot.write(f(s, i));
         }
     });
-    // SAFETY: every one of the `n` slots is written above (a panic unwinds
-    // past this, the results written leak).
+    // SAFETY: every one of the `n` slots is written above; a panic unwinds past this and leaks the results written.
     unsafe { out.set_len(n) };
     out
 }
@@ -116,8 +115,7 @@ pub struct Disjoint<'a, T> {
     _v: PhantomData<&'a mut [T]>,
 }
 
-// SAFETY: the threads of a section reach only the entries they claimed
-// (see `range`), which they may move between them.
+// SAFETY: the threads of a section reach only the entries they claimed through `range`, which they may move between them.
 unsafe impl<T: Send> Send for Disjoint<'_, T> {}
 // SAFETY: as above.
 unsafe impl<T: Send> Sync for Disjoint<'_, T> {}

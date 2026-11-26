@@ -13,10 +13,8 @@ use std::hint::spin_loop;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Ops per piece: the work given to the rate.
 const OPS_PER_PIECE: f64 = 1000.0;
 
-/// Busy on this thread for `d`.
 fn busy(d: Duration) {
     let t = Instant::now();
     while t.elapsed() < d {
@@ -53,7 +51,8 @@ fn main() {
     }
     ctx.param("section_us", section_us);
     ctx.param("gap_us", gap_us);
-    let pool: Arc<dyn rspool::Pool> = Arc::new(rspool::Workers::new(threads));
+    let pool: Arc<dyn rspool::Pool> =
+        Arc::new(rspool::Workers::new(threads).expect("the worker threads"));
     let t = Instant::now();
     {
         let _on = ctx.enter();

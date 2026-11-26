@@ -43,7 +43,7 @@ pub trait Pool: Send + Sync {
         let queue = Queue(std::sync::Mutex::new(std::collections::VecDeque::new()));
         body(&queue);
         loop {
-            let task = crate::lock(&queue.0).pop_front();
+            let task = crate::lock_ignoring_poison(&queue.0).pop_front();
             match task {
                 Some((origin, task)) => origin.run(|| task(&queue)),
                 None => return,
@@ -61,12 +61,11 @@ pub trait Spawn<'s>: Sync {
     fn spawn(&self, task: Task<'s>);
 }
 
-/// The tasks of a scope, run one after the other.
 struct Queue<'s>(std::sync::Mutex<std::collections::VecDeque<(Origin, Task<'s>)>>);
 
 impl<'s> Spawn<'s> for Queue<'s> {
     fn spawn(&self, task: Task<'s>) {
-        crate::lock(&self.0).push_back((Origin::here(), task));
+        crate::lock_ignoring_poison(&self.0).push_back((Origin::here(), task));
     }
 }
 

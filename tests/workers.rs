@@ -6,15 +6,16 @@
 fn workers_run_every_piece_once_awake_or_woken() {
     use rspool::{Pool, Workers};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::with_spin(4, std::time::Duration::from_micros(50));
+    let spin = std::time::Duration::from_micros(50);
+    let longer_than_spin = std::time::Duration::from_millis(2);
+    let w = Workers::with_spin(4, spin).unwrap();
     let hits: Vec<AtomicUsize> = (0..500).map(|_| AtomicUsize::new(0)).collect();
     for round in 0..200 {
         w.run(500, &|i| {
             hits[i].fetch_add(1, Ordering::Relaxed);
         });
-        // now and then long enough for the workers to fall asleep
         if round % 50 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            std::thread::sleep(longer_than_spin);
         }
     }
     assert!(hits.iter().all(|h| h.load(Ordering::Relaxed) == 200));
@@ -23,26 +24,23 @@ fn workers_run_every_piece_once_awake_or_woken() {
 #[test]
 fn a_panic_in_a_piece_reaches_the_caller() {
     use rspool::{Pool, Workers};
-    let w = Workers::new(3);
+    let w = Workers::new(3).unwrap();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         w.run(64, &|i| assert!(i != 37, "piece 37"));
     }));
     assert!(r.is_err());
-    // the pool goes on
     let n = std::sync::atomic::AtomicUsize::new(0);
     w.run(64, &|_| {
         n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     });
-    assert_eq!(n.into_inner(), 64);
+    assert_eq!(n.into_inner(), 64, "the pool runs after a panic");
 }
 
 #[test]
 fn sections_nest_on_the_workers() {
-    // A run whose pieces run, join and scope again, the scope's tasks
-    // starting tasks: every leaf once, with the pool's threads only.
     use rspool::{Pool, Spawn, Workers};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::new(4);
+    let w = Workers::new(4).unwrap();
     let hits: Vec<AtomicUsize> = (0..16 * 32 * 2).map(|_| AtomicUsize::new(0)).collect();
     let tasks = AtomicUsize::new(0);
     for _ in 0..20 {
@@ -78,10 +76,9 @@ fn sections_nest_on_the_workers() {
 
 #[test]
 fn threads_outside_the_pool_share_it() {
-    // Four threads outside the pool run sections on it at once.
     use rspool::{Pool, Workers};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let w = Workers::new(3);
+    let w = Workers::new(3).unwrap();
     let n = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for _ in 0..4 {
@@ -102,7 +99,7 @@ fn threads_outside_the_pool_share_it() {
 #[test]
 fn a_panic_in_a_task_or_a_side_reaches_its_section() {
     use rspool::{Pool, Spawn, Workers};
-    let w = Workers::new(3);
+    let w = Workers::new(3).unwrap();
     let side = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         w.join(&mut || {}, &mut || panic!("side"));
     }));
@@ -122,14 +119,11 @@ fn a_panic_in_a_task_or_a_side_reaches_its_section() {
 
 #[test]
 fn a_section_runs_on_its_width_whether_the_workers_spin_or_sleep() {
-    // Every piece waits until all pieces of its section run at once: a
-    // section of width k on a pool wider than k gets k threads, from workers
-    // asleep (no spin) and from workers spinning after earlier sections.
     use rspool::{Pool, Workers};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
     for spin in [Duration::ZERO, Duration::from_millis(50)] {
-        let w = Workers::with_spin(8, spin);
+        let w = Workers::with_spin(8, spin).unwrap();
         for round in 0..100 {
             let width = 2 + round % 3;
             let here = AtomicUsize::new(0);

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::constants::{SPIN, SPIN_YIELD_EVERY};
-use crate::{lock, Dispatch, Origin, Pool, Spawn};
+use crate::{lock_ignoring_poison, Dispatch, Origin, Pool, Spawn};
 
 /// A pool of threads that steal work: `threads - 1` workers and the thread
 /// that starts a section, which takes part in it. A section runs on as
@@ -27,83 +27,62 @@ pub struct Workers {
     shared: Arc<Shared>,
     threads: usize,
     handles: Vec<std::thread::JoinHandle<()>>,
-    /// What a section costs on them, measured when they start.
     dispatch: Dispatch,
 }
 
-/// A piece of work in a queue: what it runs on and how.
 #[derive(Clone, Copy)]
 struct Job {
     data: *const (),
     run: unsafe fn(*const ()),
 }
 
-// SAFETY: a job's data is the frame or the box of the section that queued
-// it, which outlives the job (see the sections).
+// SAFETY: a job's data is the frame or the box of the section that queued it, which outlives the job.
 unsafe impl Send for Job {}
 
 impl Job {
-    /// # Safety
-    /// Its section is waiting for it.
     unsafe fn execute(self) {
         unsafe { (self.run)(self.data) }
     }
 }
 
-/// What the workers and the threads starting sections share.
 struct Shared {
-    /// Queue `0` is the outside threads', queue `k` worker `k`'s.
     queues: Vec<Mutex<VecDeque<Job>>>,
-    /// Jobs in all the queues.
     queued: AtomicUsize,
     shutdown: AtomicBool,
     spin: std::time::Duration,
-    /// Workers awake and looking for work, neither running a job nor
-    /// asleep.
     spinning: AtomicUsize,
-    /// Sleeping workers, waiting on `wake` for work.
     sleepers: AtomicUsize,
     sleep: Mutex<()>,
     wake: Condvar,
 }
 
+const OUTSIDE_QUEUE: usize = 0;
+
 thread_local! {
-    /// The pool this thread works for and its queue there (`None` outside
-    /// any pool).
     static WORKER: std::cell::Cell<Option<(*const Shared, usize)>> =
         const { std::cell::Cell::new(None) };
 }
 
 impl Shared {
-    /// This thread's queue in this pool: its own for a worker, else the
-    /// outside threads'.
     fn own(&self) -> usize {
         match WORKER.with(|w| w.get()) {
             Some((p, k)) if std::ptr::eq(p, self) => k,
-            _ => 0,
+            _ => OUTSIDE_QUEUE,
         }
     }
 
     fn push(&self, job: Job) {
-        lock(&self.queues[self.own()]).push_back(job);
-        // wrapping: a thread may take the job and count it out before it
-        // is counted in here
+        lock_ignoring_poison(&self.queues[self.own()]).push_back(job);
         let queued = self.queued.fetch_add(1, SeqCst).wrapping_add(1);
-        // Queued, then look: a worker going to sleep either is seen here
-        // (spinning, or asleep) or sees the job (all sequentially
-        // consistent); it waits holding the lock from its look on, so the
-        // notice reaches it. A sleeper is woken only for the jobs the
-        // spinning workers do not cover: woken for every job, a pool wider
-        // than its sections kept all its workers spinning.
-        if self.spinning.load(SeqCst) < queued && self.sleepers.load(SeqCst) > 0 {
-            let _g = lock(&self.sleep);
+        let uncovered_by_spinning = self.spinning.load(SeqCst) < queued;
+        if uncovered_by_spinning && self.sleepers.load(SeqCst) > 0 {
+            let _g = lock_ignoring_poison(&self.sleep);
             self.wake.notify_one();
         }
     }
 
-    /// Take `job` back from this thread's queue if nobody took it yet.
     fn retract(&self, job: Job) -> bool {
-        let mut q = lock(&self.queues[self.own()]);
+        let mut q = lock_ignoring_poison(&self.queues[self.own()]);
         let at = q.iter().rposition(|j| std::ptr::eq(j.data, job.data));
         let found = at.and_then(|i| q.remove(i)).is_some();
         drop(q);
@@ -113,22 +92,20 @@ impl Shared {
         found
     }
 
-    /// A queued job: the newest of this thread's queue, else the oldest of
-    /// another.
     fn find(&self) -> Option<Job> {
         if self.queued.load(SeqCst) == 0 {
             return None;
         }
         let own = self.own();
         let n = self.queues.len();
-        let mine = lock(&self.queues[own]).pop_back();
-        let job =
-            mine.or_else(|| (1..n).find_map(|d| lock(&self.queues[(own + d) % n]).pop_front()))?;
+        let mine = lock_ignoring_poison(&self.queues[own]).pop_back();
+        let job = mine.or_else(|| {
+            (1..n).find_map(|d| lock_ignoring_poison(&self.queues[(own + d) % n]).pop_front())
+        })?;
         self.queued.fetch_sub(1, SeqCst);
         Some(job)
     }
 
-    /// Run queued work until `done` holds.
     fn wait_until(&self, done: impl Fn() -> bool) {
         let mut idle = 0u32;
         while !done() {
@@ -147,8 +124,6 @@ impl Shared {
         }
     }
 
-    /// A worker's life: run work while there is some, wait for more awake
-    /// for `spin`, then asleep.
     fn work(&self, k: usize) {
         WORKER.with(|w| w.set(Some((self as *const Shared, k))));
         let mut since = std::time::Instant::now();
@@ -175,8 +150,7 @@ impl Shared {
                 }
                 continue;
             }
-            // Announce, then look (see `push`).
-            let mut g = lock(&self.sleep);
+            let mut g = lock_ignoring_poison(&self.sleep);
             self.spinning.fetch_sub(1, SeqCst);
             self.sleepers.fetch_add(1, SeqCst);
             while self.queued.load(SeqCst) == 0 && !self.shutdown.load(SeqCst) {
@@ -190,12 +164,11 @@ impl Shared {
     }
 }
 
-/// A panic out of a job, carried to the thread that waits for it.
 type Panic = Mutex<Option<Box<dyn std::any::Any + Send>>>;
 
 fn catch(slot: &Panic, f: impl FnOnce()) {
     if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        lock(slot).get_or_insert(p);
+        lock_ignoring_poison(slot).get_or_insert(p);
     }
 }
 
@@ -205,16 +178,12 @@ fn resume(slot: Panic) {
     }
 }
 
-/// A `run` in progress, on the frame of the thread that started it: its
-/// pieces, taken in order, and its helpers queued for other threads, each
-/// taking pieces too.
 struct RunJob<'a> {
     f: &'a (dyn Fn(usize) + Sync),
     n: usize,
     next: AtomicUsize,
     done: AtomicUsize,
-    /// Helpers queued and not yet finished or taken back.
-    out: AtomicUsize,
+    helpers_out: AtomicUsize,
     panic: Panic,
     origin: Origin,
 }
@@ -231,17 +200,14 @@ impl RunJob<'_> {
         }
     }
 
-    /// # Safety
-    /// `data` is a `RunJob` whose `out` counts this helper.
     unsafe fn help(data: *const ()) {
+        // SAFETY: `data` is a `RunJob` whose `helpers_out` counts this helper, so it lives until this helper's decrement, the last touch.
         let job = unsafe { &*(data as *const RunJob<'_>) };
         job.origin.run(|| job.take());
-        // The last touch: the starting thread may return from here on.
-        job.out.fetch_sub(1, SeqCst);
+        job.helpers_out.fetch_sub(1, SeqCst);
     }
 }
 
-/// One side of a `join`, on the frame of the thread that started it.
 struct SideJob<'a> {
     f: Mutex<Option<&'a mut (dyn FnMut() + Send)>>,
     done: AtomicBool,
@@ -250,31 +216,26 @@ struct SideJob<'a> {
 }
 
 impl SideJob<'_> {
-    /// The side, run once.
-    fn call(&self) {
-        if let Some(f) = lock(&self.f).take() {
+    fn call_once(&self) {
+        if let Some(f) = lock_ignoring_poison(&self.f).take() {
             catch(&self.panic, f);
         }
     }
 
-    /// # Safety
-    /// `data` is a `SideJob` its `join` waits for.
     unsafe fn run(data: *const ()) {
+        // SAFETY: `data` is a `SideJob` that its `join` waits for, so it lives until `done` is set, the last touch.
         let job = unsafe { &*(data as *const SideJob<'_>) };
-        job.origin.run(|| job.call());
-        // The last touch: the joining thread may return from here on.
+        job.origin.run(|| job.call_once());
         job.done.store(true, SeqCst);
     }
 }
 
-/// A `scope` in progress: its tasks not yet finished.
 struct ScopeJob<'p> {
     shared: &'p Shared,
     open: AtomicUsize,
     panic: Panic,
 }
 
-/// A task of a scope, boxed, with its scope.
 struct TaskJob<'s> {
     scope: *const ScopeJob<'s>,
     task: Box<dyn FnOnce(&dyn Spawn<'s>) + Send + 's>,
@@ -297,17 +258,16 @@ impl<'s> Spawn<'s> for ScopeJob<'s> {
 }
 
 impl TaskJob<'_> {
-    /// # Safety
-    /// `data` is a boxed `TaskJob` whose scope waits for it.
     unsafe fn run(data: *const ()) {
+        // SAFETY: `data` is a boxed `TaskJob` from `spawn`, taken from its queue once.
         let TaskJob {
             scope,
             task,
             origin,
         } = *unsafe { Box::from_raw(data as *mut TaskJob<'_>) };
+        // SAFETY: the scope waits for this task, so it lives until `open` is decremented, the last touch.
         let scope = unsafe { &*scope };
         origin.run(|| catch(&scope.panic, || task(scope)));
-        // The last touch: the scope may return from here on.
         scope.open.fetch_sub(1, SeqCst);
     }
 }
@@ -315,12 +275,19 @@ impl TaskJob<'_> {
 impl Workers {
     /// A pool of `threads` threads (the caller one of them), waiting
     /// [`SPIN`] for work before they sleep.
-    pub fn new(threads: usize) -> Self {
+    ///
+    /// # Errors
+    /// The error of [`std::thread::Builder::spawn`] if a worker thread cannot
+    /// be started. The workers started before it are shut down and joined.
+    pub fn new(threads: usize) -> std::io::Result<Self> {
         Self::with_spin(threads, SPIN)
     }
 
     /// [`new`](Self::new) with the workers waiting `spin` for work.
-    pub fn with_spin(threads: usize, spin: std::time::Duration) -> Self {
+    ///
+    /// # Errors
+    /// As [`new`](Self::new).
+    pub fn with_spin(threads: usize, spin: std::time::Duration) -> std::io::Result<Self> {
         let threads = threads.max(1);
         let shared = Arc::new(Shared {
             queues: (0..threads).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -332,24 +299,22 @@ impl Workers {
             sleep: Mutex::new(()),
             wake: Condvar::new(),
         });
-        let handles = (1..threads)
-            .map(|k| {
-                let sh = shared.clone();
-                std::thread::Builder::new()
-                    .name(format!("rspool-worker-{k}"))
-                    .spawn(move || sh.work(k))
-                    .expect("a worker thread")
-            })
-            .collect();
         let mut w = Workers {
             shared,
             threads,
-            handles,
+            handles: Vec::with_capacity(threads - 1),
             dispatch: Dispatch::never(),
         };
+        for k in 1..threads {
+            let sh = w.shared.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("rspool-worker-{k}"))
+                .spawn(move || sh.work(k))?;
+            w.handles.push(handle);
+        }
         let measured = Dispatch::measure(threads, &|k, piece| w.run_width(k, k, piece));
         w.dispatch = measured;
-        w
+        Ok(w)
     }
 }
 
@@ -378,7 +343,7 @@ impl Pool for Workers {
             n,
             next: AtomicUsize::new(0),
             done: AtomicUsize::new(0),
-            out: AtomicUsize::new(0),
+            helpers_out: AtomicUsize::new(0),
             panic: Mutex::new(None),
             origin: Origin::here(),
         };
@@ -387,24 +352,22 @@ impl Pool for Workers {
             run: RunJob::help,
         };
         let helpers = (n - 1).min(width - 1);
-        job.out.store(helpers, SeqCst);
+        job.helpers_out.store(helpers, SeqCst);
         for _ in 0..helpers {
             sh.push(helper);
         }
         job.take();
-        // From here on this thread waits for its helpers: `wait` at the
-        // current rsprobe node, the clock read only where it is recorded.
-        let mut waiting = None;
+        let mut wait_start_if_recorded = None;
         rsprobe::time!(DEBUG, "wait", {
-            waiting = Some(crate::clock::Instant::now());
+            wait_start_if_recorded = Some(crate::clock::Instant::now());
             0
         });
-        // Every piece is taken: the helpers nobody started come back.
-        while job.out.load(SeqCst) > 0 && sh.retract(helper) {
-            job.out.fetch_sub(1, SeqCst);
+        debug_assert!(job.next.load(SeqCst) >= n, "a piece is left for a helper");
+        while job.helpers_out.load(SeqCst) > 0 && sh.retract(helper) {
+            job.helpers_out.fetch_sub(1, SeqCst);
         }
-        sh.wait_until(|| job.done.load(SeqCst) == n && job.out.load(SeqCst) == 0);
-        if let Some(t) = waiting {
+        sh.wait_until(|| job.done.load(SeqCst) == n && job.helpers_out.load(SeqCst) == 0);
+        if let Some(t) = wait_start_if_recorded {
             rsprobe::time!(DEBUG, "wait", t.elapsed().as_nanos());
         }
         resume(job.panic);
@@ -431,8 +394,7 @@ impl Pool for Workers {
         let first: Panic = Mutex::new(None);
         catch(&first, a);
         if sh.retract(job) {
-            // taken back: this thread alone runs it, inside the join
-            side.call();
+            side.call_once();
         } else {
             sh.wait_until(|| side.done.load(SeqCst));
         }
@@ -446,8 +408,7 @@ impl Pool for Workers {
             open: AtomicUsize::new(0),
             panic: Mutex::new(None),
         };
-        // SAFETY: the tasks borrow nothing that outlives the scope beyond
-        // `'s`, and the scope returns only once every task ran.
+        // SAFETY: the tasks borrow nothing that outlives the scope beyond `'s`, and the scope returns only once every task ran.
         let spawn: &ScopeJob<'s> =
             unsafe { std::mem::transmute::<&ScopeJob<'_>, &ScopeJob<'s>>(&scope) };
         catch(&scope.panic, || body(spawn));
@@ -460,7 +421,7 @@ impl Drop for Workers {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, SeqCst);
         {
-            let _g = lock(&self.shared.sleep);
+            let _g = lock_ignoring_poison(&self.shared.sleep);
             self.shared.wake.notify_all();
         }
         for h in self.handles.drain(..) {

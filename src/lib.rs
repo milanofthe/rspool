@@ -64,8 +64,7 @@ pub use ranges::{chunks_mut, map, map_init, ranges, ranges_init, Disjoint};
 pub use rate::{Go, Rate, Work};
 pub use workers::Workers;
 
-/// `m` locked: a lock is poisoned only by a panic its section carries on.
-pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_ignoring_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -88,36 +87,26 @@ impl Lent {
 
 thread_local! {
     pub(crate) static CURRENT: RefCell<Option<Lent>> = const { RefCell::new(None) };
-    /// The threads the sections this thread opens may take: its piece's
-    /// share of an enclosing section (`0`: no section encloses it, the
-    /// whole pool).
-    static SHARE: Cell<usize> = const { Cell::new(0) };
-    /// Pieces of sections this thread is running.
-    static IN_PIECE: Cell<u32> = const { Cell::new(0) };
+    static SHARE: Cell<usize> = const { Cell::new(WHOLE_POOL) };
+    static PIECES_RUNNING: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Where a task was issued: the current rsprobe node there, entered by
-/// whichever thread runs the task. On a worker the task's time is `busy`
-/// of its scopes; on the issuing thread itself only the node changes.
+pub(crate) const WHOLE_POOL: usize = 0;
+
 #[derive(Clone, Copy)]
 pub(crate) struct Origin(rsprobe::Handle);
 
 impl Origin {
-    /// The node current on this thread, for a task issued here.
     pub(crate) fn here() -> Origin {
         Origin(rsprobe::current())
     }
 
-    /// `f` under the issuing node.
     pub(crate) fn run<R>(self, f: impl FnOnce() -> R) -> R {
         let _node = self.0.enter();
         f()
     }
 }
 
-/// The section `f(i)` for `i` in `0..n` on `k` threads, the width final:
-/// serially for `k < 2`, else through `wide`. Counted afterwards at the
-/// current rsprobe node.
 pub(crate) fn section(n: usize, k: usize, f: &Piece<'_>, wide: impl FnOnce()) {
     if k < 2 {
         (0..n).for_each(f);
@@ -127,7 +116,6 @@ pub(crate) fn section(n: usize, k: usize, f: &Piece<'_>, wide: impl FnOnce()) {
     counted(k);
 }
 
-/// A section on `k` threads counted at the current rsprobe node.
 pub(crate) fn counted(k: usize) {
     rsprobe::add!(DEBUG, "sections", 1);
     rsprobe::add!(DEBUG, "width", k);
@@ -155,7 +143,7 @@ pub fn install_lent<R>(lent: Lent, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(
         CURRENT.with(|c| c.replace(Some(lent))),
-        SHARE.with(|s| s.replace(0)),
+        SHARE.with(|s| s.replace(WHOLE_POOL)),
     );
     f()
 }
@@ -172,29 +160,25 @@ pub fn is_lent() -> bool {
 
 /// Whether this thread is running a piece of a section.
 pub fn in_piece() -> bool {
-    IN_PIECE.with(|p| p.get()) > 0
+    PIECES_RUNNING.with(|p| p.get()) > 0
 }
 
-/// The threads a section opened here may take of a pool of `threads`.
 pub(crate) fn share(threads: usize) -> usize {
     match SHARE.with(|s| s.get()) {
-        0 => threads,
+        WHOLE_POOL => threads,
         s => s.min(threads),
     }
 }
 
-/// `f(i)` as a piece of a section on `k` of `cap` threads: on this thread
-/// with `lent` lent (where it runs on another thread than the section's),
-/// the sections it opens left `cap / k` threads.
 pub(crate) fn piece<R>(lent: Option<&Lent>, inner: usize, f: impl FnOnce() -> R) -> R {
     struct Leave(usize);
     impl Drop for Leave {
         fn drop(&mut self) {
-            IN_PIECE.with(|p| p.set(p.get() - 1));
+            PIECES_RUNNING.with(|p| p.set(p.get() - 1));
             SHARE.with(|s| s.set(self.0));
         }
     }
-    IN_PIECE.with(|p| p.set(p.get() + 1));
+    PIECES_RUNNING.with(|p| p.set(p.get() + 1));
     let _leave = Leave(SHARE.with(|s| s.replace(inner)));
     match lent {
         Some(l) if CURRENT.with(|c| c.borrow().is_none()) => install_inner(l, f),
@@ -218,7 +202,6 @@ pub fn share_of(threads: usize) -> usize {
     share(threads)
 }
 
-/// `f` with `lent` lent on this thread, the share already set.
 fn install_inner<R>(lent: &Lent, f: impl FnOnce() -> R) -> R {
     struct Restore;
     impl Drop for Restore {
@@ -288,7 +271,6 @@ impl Place for Here {
     }
 }
 
-/// `f(i)` for `i` in `0..n` on `k` threads of the lent pool `l`.
 pub(crate) fn lent_run(l: &Lent, n: usize, k: usize, f: &Piece<'_>) {
     let cap = share(l.pool.threads());
     let k = k.min(n).min(cap).max(1);

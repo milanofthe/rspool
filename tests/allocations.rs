@@ -29,7 +29,6 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
-/// Allocations of 100 runs of `f`, after one warm-up run.
 fn allocs(mut f: impl FnMut()) -> usize {
     f();
     let before = ALLOCS.with(Cell::get);
@@ -46,12 +45,27 @@ fn deciding_a_section_allocates_nothing() {
         let work = Work::of(ops, &r);
         std::hint::black_box(work.go::<Here>(64));
     };
-    // no pool lent
     assert_eq!(allocs(|| decide(1e3)), 0, "without a pool");
-    // a pool lent, small work and work it decides on
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     rspool::install(w, || {
         assert_eq!(allocs(|| decide(1.0)), 0, "small work");
         assert_eq!(allocs(|| decide(1e3)), 0, "decided work");
+    });
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn deciding_a_section_in_a_piece_of_an_unmeasured_rayon_pool_allocates_nothing() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        rspool::rayon::run_width(2, 2, &|_| {
+            let decide = || {
+                std::hint::black_box(rspool::rayon::width(1e6, 64));
+            };
+            assert_eq!(allocs(decide), 0);
+        });
     });
 }
