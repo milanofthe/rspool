@@ -16,11 +16,11 @@
 //! machine, with no threshold tuned to one.
 //!
 //! A loop over `n` items ([`ranges_init`], and on it [`ranges`],
-//! [`chunks_mut`], [`map_init`], [`map`]) is such a section whose threads
-//! claim ranges of the items until none is left, each with a state of its
-//! own: the width and the length of the ranges both follow from the
-//! caller's estimate of the work ([`Dispatch::ranges`]). A section that
-//! writes several slices by range takes them as [`Disjoint`].
+//! [`chunks_mut`], [`map_init`], [`map`], [`map_owned`]) is such a section
+//! whose threads claim ranges of the items until none is left, each with a
+//! state of its own: the width and the length of the ranges both follow
+//! from the caller's estimate of the work ([`Dispatch::ranges`]). A section
+//! that writes several slices by range takes them as [`Disjoint`].
 //!
 //! A section on `k` threads leaves the sections its pieces open the pool's
 //! threads over `k` ([`width`]): inside a section as wide as the pool,
@@ -59,8 +59,9 @@ mod workers;
 pub use clock::Instant;
 pub use constants::{GAIN, SPIN};
 pub use dispatch::Dispatch;
+use pool::Once;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
-pub use ranges::{chunks_mut, map, map_init, ranges, ranges_init, Disjoint};
+pub use ranges::{chunks_mut, map, map_init, map_owned, ranges, ranges_init, Disjoint};
 pub use rate::{Go, Rate, Work};
 pub use workers::Workers;
 
@@ -82,6 +83,40 @@ impl Lent {
     pub fn new(pool: Arc<dyn Pool>) -> Self {
         let dispatch = pool.dispatch();
         Lent { pool, dispatch }
+    }
+
+    /// `f()`, run by the pool's [`Pool::enter`]; if the pool did not run it,
+    /// on the calling thread after. A panic of `f` reaches the caller.
+    pub fn enter<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        let mut f = Once::Ready(f);
+        self.pool.enter(&mut || f.run(|f| f()));
+        f.finish(|f| f())
+    }
+
+    /// `(a(), b())`, run by the pool's [`Pool::join`]; a side the pool did
+    /// not run runs on the calling thread after. A panic of either reaches
+    /// the caller once both are done, `a`'s first.
+    pub fn join<A: Send, B: Send>(
+        &self,
+        a: impl FnOnce() -> A + Send,
+        b: impl FnOnce() -> B + Send,
+    ) -> (A, B) {
+        let (mut a, mut b) = (Once::Ready(a), Once::Ready(b));
+        self.pool
+            .join(&mut || a.run(|f| f()), &mut || b.run(|f| f()));
+        a.run(|f| f());
+        b.run(|f| f());
+        (a.finish(|f| f()), b.finish(|f| f()))
+    }
+
+    /// `body(spawn)`, run by the pool's [`Pool::scope`], returning once it
+    /// and every task it started ran; if the pool did not run `body`, on the
+    /// calling thread after, its tasks one after the other after it. A panic
+    /// of `body` reaches the caller; one of a task, as the pool passes it on.
+    pub fn scope<'s, R: Send>(&self, body: impl FnOnce(&dyn Spawn<'s>) -> R + Send) -> R {
+        let mut body = Once::Ready(body);
+        self.pool.scope(&mut |s: &dyn Spawn<'s>| body.run(|f| f(s)));
+        body.finish(pool::queued)
     }
 }
 

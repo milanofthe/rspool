@@ -200,3 +200,96 @@ fn rayon_loops_visit_every_index_once() {
         assert!((1..=4).contains(&states.into_inner()));
     });
 }
+
+struct Counted<'a> {
+    i: usize,
+    drops: &'a [AtomicUsize],
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        self.drops[self.i].fetch_add(1, Relaxed);
+    }
+}
+
+fn counted(drops: &[AtomicUsize]) -> Vec<Counted<'_>> {
+    (0..drops.len()).map(|i| Counted { i, drops }).collect()
+}
+
+#[test]
+fn map_owned_moves_every_item_into_f_once_in_order() {
+    let one = |work: f64| {
+        for n in [0, 1, 2, 7, 1000] {
+            let drops: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            let calls: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            let out = rspool::map_owned::<Here, _, _>(counted(&drops), Work::ns(work), |c| {
+                calls[c.i].fetch_add(1, Relaxed);
+                3 * c.i
+            });
+            assert!(out.iter().enumerate().all(|(i, &x)| x == 3 * i), "{n}");
+            assert!(calls.iter().all(|c| c.load(Relaxed) == 1), "{n}");
+            assert!(drops.iter().all(|d| d.load(Relaxed) == 1), "{n}");
+        }
+    };
+    one(f64::INFINITY);
+    lent(4, Dispatch::free(4), || {
+        one(1.0);
+        one(f64::INFINITY);
+    });
+}
+
+#[test]
+fn map_owned_hands_back_results_that_drop_once() {
+    lent(4, Dispatch::free(4), || {
+        let drops: Vec<AtomicUsize> = (0..500).map(|_| AtomicUsize::new(0)).collect();
+        let kept: Vec<AtomicUsize> = (0..500).map(|_| AtomicUsize::new(0)).collect();
+        let out = rspool::map_owned::<Here, _, _>(counted(&drops), Work::ns(f64::INFINITY), |c| {
+            Counted {
+                i: c.i,
+                drops: &kept,
+            }
+        });
+        assert!(out.iter().enumerate().all(|(i, c)| c.i == i));
+        assert!(kept.iter().all(|d| d.load(Relaxed) == 0));
+        drop(out);
+        assert!(kept.iter().all(|d| d.load(Relaxed) == 1));
+        assert!(drops.iter().all(|d| d.load(Relaxed) == 1));
+    });
+}
+
+#[test]
+fn a_panic_in_map_owned_reaches_the_caller_and_drops_no_item_twice() {
+    let one = |work: f64| {
+        let drops: Vec<AtomicUsize> = (0..64).map(|_| AtomicUsize::new(0)).collect();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rspool::map_owned::<Here, _, _>(counted(&drops), Work::ns(work), |c| {
+                assert!(c.i != 37, "item 37");
+                c.i
+            })
+        }));
+        assert!(r.is_err());
+        assert!(drops.iter().all(|d| d.load(Relaxed) <= 1));
+        assert_eq!(drops[37].load(Relaxed), 1, "the item of the panic drops");
+    };
+    one(f64::INFINITY);
+    lent(3, Dispatch::free(3), || one(f64::INFINITY));
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn rayon_map_owned_moves_every_item_once_in_order() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        let drops: Vec<AtomicUsize> = (0..1000).map(|_| AtomicUsize::new(0)).collect();
+        let out = rspool::map_owned::<rspool::rayon::Rayon, _, _>(
+            counted(&drops),
+            Work::ns(f64::INFINITY),
+            |c| c.i,
+        );
+        assert!(out.iter().enumerate().all(|(i, &x)| x == i));
+        assert!(drops.iter().all(|d| d.load(Relaxed) == 1));
+    });
+}

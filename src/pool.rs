@@ -24,30 +24,64 @@ pub trait Pool: Send + Sync {
     fn dispatch(&self) -> Dispatch {
         Dispatch::assumed(self.threads())
     }
-    /// Run `f` where handing work to the pool is cheapest: on one of its
-    /// workers, for a pool whose hand-off from outside costs more (a thread
-    /// put to sleep and woken). The default runs it here.
+    /// Run `f` once where handing work to the pool is cheapest, returning
+    /// when it ran: on one of its workers, for a pool whose hand-off from
+    /// outside costs more (a thread put to sleep and woken). A panic of `f`
+    /// reaches the caller. The default runs it here.
     fn enter(&self, f: &mut (dyn FnMut() + Send)) {
         f()
     }
-    /// Run `a` and `b`, side by side where the pool can, returning when
-    /// both ran. The default runs one after the other.
+    /// Run `a` and `b` once each, side by side where the pool can,
+    /// returning when both ran. A panic of either reaches the caller (the
+    /// other one need not run then). The default runs one after the other.
     fn join(&self, a: &mut (dyn FnMut() + Send), b: &mut (dyn FnMut() + Send)) {
         a();
         b();
     }
-    /// Run `body` with a [`Spawn`] its tasks start tasks through, returning
-    /// once every task ran. The default runs the tasks one after the other
-    /// after `body`.
+    /// Run `body` once with a [`Spawn`] its tasks start tasks through,
+    /// returning once `body` and every task ran. A panic of `body` or of a
+    /// task reaches the caller (tasks not started yet need not run then).
+    /// The default runs the tasks one after the other after `body`.
     fn scope<'s>(&self, body: &mut (dyn FnMut(&dyn Spawn<'s>) + Send)) {
-        let queue = Queue(std::sync::Mutex::new(std::collections::VecDeque::new()));
-        body(&queue);
-        loop {
-            let task = crate::lock_ignoring_poison(&queue.0).pop_front();
-            match task {
-                Some((origin, task)) => origin.run(|| task(&queue)),
-                None => return,
-            }
+        queued(|s| body(s))
+    }
+}
+
+pub(crate) fn queued<'s, R>(body: impl FnOnce(&dyn Spawn<'s>) -> R) -> R {
+    let queue = Queue(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let r = body(&queue);
+    loop {
+        let task = crate::lock_ignoring_poison(&queue.0).pop_front();
+        match task {
+            Some((origin, task)) => origin.run(|| task(&queue)),
+            None => return r,
+        }
+    }
+}
+
+pub(crate) struct Unfinished;
+
+pub(crate) enum Once<F, R> {
+    Ready(F),
+    Done(std::thread::Result<R>),
+}
+
+impl<F, R> Once<F, R> {
+    pub(crate) fn run(&mut self, call: impl FnOnce(F) -> R) {
+        let unfinished = Once::Done(Err(Box::new(Unfinished)));
+        *self = match std::mem::replace(self, unfinished) {
+            Once::Ready(f) => Once::Done(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || call(f),
+            ))),
+            done => done,
+        };
+    }
+
+    pub(crate) fn finish(self, call: impl FnOnce(F) -> R) -> R {
+        match self {
+            Once::Ready(f) => call(f),
+            Once::Done(Ok(r)) => r,
+            Once::Done(Err(p)) => std::panic::resume_unwind(p),
         }
     }
 }
