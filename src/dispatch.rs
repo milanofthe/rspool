@@ -139,6 +139,34 @@ impl Dispatch {
         }
     }
 
+    /// The ranges `n` items of `work` ns are cut into on `k` threads, each
+    /// claimed by one of them as it frees up ([`ranges_init`](
+    /// crate::ranges_init)). Of `m` ranges a thread claims ranges of
+    /// `work / m` ns; the last one claimed ends at most that long after the
+    /// others, and each claim costs `c`: about `work / k + m c / k + work /
+    /// m` on `k` threads, shortest at `m = sqrt(k work / c)`. A claim is
+    /// taken to cost what the section costs per thread, `cost(k) / k`: the
+    /// section the cost is measured on gives each of its threads one piece
+    /// by the same claim of a shared cursor, with the wake and hand-over of
+    /// the thread on top, so the claim is overestimated and the cut errs to
+    /// fewer, longer ranges. So `m = k sqrt(work / cost(k))`: at least one
+    /// range per thread, at most one per item, one per item where a section
+    /// costs nothing or the work is infinite.
+    pub fn ranges(&self, work: f64, n: usize, k: usize) -> usize {
+        if k < 2 || n < 2 {
+            return n.min(1);
+        }
+        let k = k.min(n);
+        if !(work > 0.0) {
+            return k;
+        }
+        let per = (work / self.cost(k)).sqrt();
+        if !(per < n as f64) {
+            return n;
+        }
+        ((k as f64 * per).ceil() as usize).clamp(k, n)
+    }
+
     /// What a section costs on a pool of `threads` threads, measured:
     /// `run(k, piece)` runs `piece(i)` for `i` in `0..k` on `k` threads.
     /// Measured on two, four, eight, ... threads and on all of them, in

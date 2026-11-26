@@ -41,11 +41,6 @@ pub const CALIBRATION_PIECE_NS: u64 = 5_000;
 /// queue's.
 pub const CALIBRATION_LINES: usize = 8;
 
-/// Pieces of work per thread a section of many items is cut into
-/// ([`piece_len`](crate::piece_len)): about four balance items of unequal
-/// cost, and a piece still carries enough work to pay for its hand-off.
-pub const PIECES_PER_WORKER: usize = 4;
-
 /// How long [`Workers`](crate::Workers) keep looking for work before they
 /// sleep: longer than the serial stretch between a solver's sections, so
 /// they reach awake workers, and short enough that an idle pool costs

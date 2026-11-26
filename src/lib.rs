@@ -15,6 +15,13 @@
 //! the pool, so small work stays serial and large work goes wide on any
 //! machine, with no threshold tuned to one.
 //!
+//! A loop over `n` items ([`ranges_init`], and on it [`ranges`],
+//! [`chunks_mut`], [`map_init`], [`map`]) is such a section whose threads
+//! claim ranges of the items until none is left, each with a state of its
+//! own: the width and the length of the ranges both follow from the
+//! caller's estimate of the work ([`Dispatch::ranges`]). A section that
+//! writes several slices by range takes them as [`Disjoint`].
+//!
 //! A section on `k` threads leaves the sections its pieces open the pool's
 //! threads over `k` ([`width`]): inside a section as wide as the pool,
 //! everything runs serially on its piece's thread; inside a narrower one,
@@ -43,15 +50,17 @@ mod clock;
 pub mod constants;
 mod dispatch;
 mod pool;
+mod ranges;
 mod rate;
 #[cfg(feature = "rayon")]
 pub mod rayon;
 mod workers;
 
 pub use clock::Instant;
-pub use constants::{GAIN, PIECES_PER_WORKER, SPIN};
+pub use constants::{GAIN, SPIN};
 pub use dispatch::Dispatch;
 pub use pool::{Piece, Pool, Serial, Spawn, Task};
+pub use ranges::{chunks_mut, map, map_init, ranges, ranges_init, Disjoint};
 pub use rate::{Go, Rate, Work};
 pub use workers::Workers;
 
@@ -115,6 +124,11 @@ pub(crate) fn section(n: usize, k: usize, f: &Piece<'_>, wide: impl FnOnce()) {
     } else {
         wide();
     }
+    counted(k);
+}
+
+/// A section on `k` threads counted at the current rsprobe node.
+pub(crate) fn counted(k: usize) {
     rsprobe::add!(DEBUG, "sections", 1);
     rsprobe::add!(DEBUG, "width", k);
     if k < 2 {
@@ -309,13 +323,4 @@ pub fn width(work: f64, pieces: usize) -> usize {
 /// they are worth here.
 pub fn run_rated(n: usize, ops: f64, rate: &Rate, f: &Piece<'_>) {
     Work::of(ops, rate).run::<Here>(n, f)
-}
-
-/// Items per piece for `n` items on `k` threads: about
-/// [`PIECES_PER_WORKER`] pieces per thread, all in one piece on one.
-pub fn piece_len(n: usize, k: usize) -> usize {
-    if k < 2 {
-        return n.max(1);
-    }
-    (n / (k * PIECES_PER_WORKER)).max(1)
 }
