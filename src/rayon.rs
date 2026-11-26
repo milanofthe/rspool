@@ -105,14 +105,13 @@ fn with_rayon<R>(threads: usize, f: impl FnOnce(&Dispatch) -> R) -> R {
     let cached =
         RAYON.with(|c| matches!(&*c.borrow(), Some((t, i, _)) if *t == threads && *i == inside));
     if !cached {
-        match measured(threads, inside) {
-            Some(d) => RAYON.with(|c| *c.borrow_mut() = Some((threads, inside, d))),
-            None => return f(&kept(false, threads)),
+        if let Some(d) = measured(threads, inside) {
+            RAYON.with(|c| *c.borrow_mut() = Some((threads, inside, d)));
         }
     }
     RAYON.with(|c| match &*c.borrow() {
-        Some((_, _, d)) => f(d),
-        None => unreachable!("cached above"),
+        Some((t, i, d)) if *t == threads && *i == inside => f(d),
+        _ => f(&kept(false, threads)),
     })
 }
 
@@ -120,8 +119,7 @@ fn measured(threads: usize, inside: bool) -> Option<Dispatch> {
     if let Some(d) = found(threads, inside) {
         return Some(d);
     }
-    let measuring_would_time_the_enclosing_section = crate::in_piece();
-    if measuring_would_time_the_enclosing_section {
+    if crate::in_piece() {
         return None;
     }
     let measured_unlocked = crate::piece(None, 1, || {

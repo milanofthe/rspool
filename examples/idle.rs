@@ -254,7 +254,7 @@ impl Pin {
             cpu::pin(c);
         }
     }
-    fn start_workers_inheriting_affinity<T>(&self, start: impl FnOnce() -> T) -> T {
+    fn start_workers_unpinned<T>(&self, start: impl FnOnce() -> T) -> T {
         let all = cpu::allowed();
         self.workers();
         let started = start();
@@ -407,10 +407,9 @@ fn main() {
     let t = Instant::now();
     match runner.as_str() {
         "workers" => {
-            let pool: Arc<dyn rspool::Pool> =
-                Arc::new(pin.start_workers_inheriting_affinity(|| {
-                    rspool::Workers::with_spin(threads, spin).expect("the worker threads")
-                }));
+            let pool: Arc<dyn rspool::Pool> = Arc::new(pin.start_workers_unpinned(|| {
+                rspool::Workers::with_spin(threads, spin).expect("the worker threads")
+            }));
             let _on = ctx.enter();
             rspool::install(pool, &mut body);
         }
