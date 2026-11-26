@@ -2,6 +2,8 @@
 //! wasm32-unknown-unknown `std::time::Instant::now()` panics, so there every
 //! instant reads zero time. Nothing is timed there, and nothing traps.
 
+pub(crate) const INERT: bool = cfg!(target_arch = "wasm32");
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use std::time::Instant;
 

@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use rspool::{Here, Place, Pool, Serial, Spawn, Workers};
 use rsprobe::{add, scope, Context, Level, Record};
 
-/// Whether rsprobe records in this build.
-fn on() -> bool {
+fn rsprobe_records() -> bool {
     let ctx = Context::new();
     {
         let _c = ctx.enter();
@@ -20,7 +19,6 @@ fn on() -> bool {
     ctx.record().find(&["on"]).is_some()
 }
 
-/// Busy for `d`, or until `until` holds.
 fn hold(d: Duration, until: &dyn Fn() -> bool) {
     let t = Instant::now();
     while t.elapsed() < d && !until() {
@@ -29,18 +27,14 @@ fn hold(d: Duration, until: &dyn Fn() -> bool) {
 }
 
 const PIECE: Duration = Duration::from_micros(100);
-/// How long a side waits for the other to be taken by another thread.
-const SIDE: Duration = Duration::from_millis(200);
+const OTHER_SIDE_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// A side of the join: one scope site for both.
 fn side(items: u64, f: impl FnOnce()) {
     let _s = scope!("side");
     add!("items", items);
     f()
 }
 
-/// A task of the scope: one scope site for all, a task spawned inside a task
-/// hanging under it.
 fn task(items: u64, f: impl FnOnce()) {
     let _t = scope!("task");
     add!("items", items);
@@ -48,8 +42,6 @@ fn task(items: u64, f: impl FnOnce()) {
     f()
 }
 
-/// A run whose pieces run again, a join and a scope whose tasks spawn
-/// tasks, all scopes under `section`.
 fn work(p: &dyn Pool) {
     let _s = scope!("section");
     p.run(16, &|i| {
@@ -63,7 +55,11 @@ fn work(p: &dyn Pool) {
     });
     let started = AtomicBool::new(false);
     p.join(
-        &mut || side(1, || hold(SIDE, &|| started.load(Ordering::SeqCst))),
+        &mut || {
+            side(1, || {
+                hold(OTHER_SIDE_TIMEOUT, &|| started.load(Ordering::SeqCst))
+            })
+        },
         &mut || side(2, || started.store(true, Ordering::SeqCst)),
     );
     p.scope(&mut |s: &dyn Spawn<'_>| {
@@ -75,8 +71,7 @@ fn work(p: &dyn Pool) {
     });
 }
 
-/// Per node its path, calls and `items`, sorted.
-fn exact(r: &Record) -> Vec<(String, u64, u64)> {
+fn paths_calls_items(r: &Record) -> Vec<(String, u64, u64)> {
     let name = |i: usize| {
         let s = r.nodes[i].site?;
         r.sites.iter().find(|x| x.0 == s).map(|x| x.1.name)
@@ -97,7 +92,6 @@ fn exact(r: &Record) -> Vec<(String, u64, u64)> {
     v
 }
 
-/// `m` at node `i`, summed over the sites that add it.
 fn sum(r: &Record, i: usize, m: &str) -> u64 {
     r.nodes[i]
         .values
@@ -125,20 +119,24 @@ fn tasks_of_a_run_a_join_and_a_scope_land_under_the_caller() {
     let w = Workers::new(4).unwrap();
     let wide = recorded(|| work(&w));
     let serial = recorded(|| work(&Serial));
-    if !on() {
-        assert_eq!(exact(&wide).len(), 1);
+    if !rsprobe_records() {
+        assert_eq!(paths_calls_items(&wide).len(), 1);
         return;
     }
-    // the same tree and counts as the serial run, nested sections included
-    assert_eq!(exact(&wide), exact(&serial));
+    assert_eq!(
+        paths_calls_items(&wide),
+        paths_calls_items(&serial),
+        "the same tree and counts as the serial run"
+    );
     assert_eq!(get(&wide, &["section", "piece"], "calls"), 16);
     assert_eq!(get(&wide, &["section", "piece", "inner"], "calls"), 64);
     assert_eq!(get(&wide, &["section", "side"], "items"), 3);
     assert_eq!(get(&wide, &["section", "task"], "calls"), 8);
     assert_eq!(get(&wide, &["section", "task", "task"], "calls"), 8);
-    // more than the issuing thread recorded: the join holds its first side
-    // until another thread has run the second
-    assert!(wide.threads > 1);
+    assert!(
+        wide.threads > 1,
+        "the join holds its first side until another thread has run the second"
+    );
 }
 
 #[test]
@@ -153,14 +151,13 @@ fn every_section_counts_its_width_at_the_current_node() {
             let _s = scope!("section");
             Here::run_width(16, 4, &|_| ());
             Here::run_width(16, 1, &|_| ());
-            // two pieces of a pool of four leave each piece two threads
             Here::run_width(2, 2, &|_| {
                 let _p = scope!("piece");
                 Here::run_width(8, 2, &|_| ());
             });
         })
     });
-    if !on() {
+    if !rsprobe_records() {
         return;
     }
     assert_eq!(get(&r, &["section"], "sections"), 3);
@@ -169,17 +166,15 @@ fn every_section_counts_its_width_at_the_current_node() {
     assert_eq!(get(&r, &["section", "piece"], "sections"), 2);
     assert_eq!(get(&r, &["section", "piece"], "width"), 4);
     assert_eq!(get(&r, &["section", "piece"], "serial"), 0);
-    // below the threshold nothing is counted
-    let info = Context::new();
+    let below_threshold = Context::new();
     {
-        let _c = info.enter();
+        let _c = below_threshold.enter();
         Here::run_width(16, 1, &|_| ());
     }
-    assert_eq!(get(&info.record(), &[], "sections"), 0);
+    assert_eq!(get(&below_threshold.record(), &[], "sections"), 0);
 }
 
-/// Whether node `i` has measure `m`, and its kind (`true` exact).
-fn kind(r: &Record, path: &[&str], m: &str) -> Option<bool> {
+fn measure_is_exact(r: &Record, path: &[&str], m: &str) -> Option<bool> {
     let i = r.find(path)? as usize;
     r.nodes[i].values.iter().find(|v| v.0 == m)?;
     r.measures.iter().find(|x| x.0 == m).map(|x| x.1)
@@ -201,13 +196,13 @@ fn a_wide_section_on_workers_records_the_callers_wait() {
             }
         })
     });
-    if !on() {
+    if !rsprobe_records() {
         return;
     }
     let at = ["section"];
     assert_eq!(get(&r, &at, "sections"), 16);
     assert_eq!(get(&r, &at, "width"), 16 * 4);
-    assert_eq!(kind(&r, &at, "wait"), Some(false));
+    assert_eq!(measure_is_exact(&r, &at, "wait"), Some(false));
 }
 
 #[test]
@@ -247,7 +242,7 @@ fn rayon_pieces_land_under_the_caller() {
             });
         })
     });
-    if !on() {
+    if !rsprobe_records() {
         return;
     }
     assert_eq!(get(&r, &["section", "piece"], "calls"), 16);

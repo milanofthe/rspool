@@ -39,7 +39,6 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// `ops` steps of eight independent multiply-add chains.
 fn ops(ops: u64) -> f64 {
     let mut x = [1.0f64, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7];
     for _ in 0..ops {
@@ -50,41 +49,28 @@ fn ops(ops: u64) -> f64 {
     std::hint::black_box(x.iter().sum())
 }
 
-/// The serial work of a round and its input.
 struct Serial {
     kind: Kind,
     n: usize,
-    /// The input as written.
-    a: Vec<f64>,
-    /// The input the work runs on: written by the section's pieces where
-    /// the section feeds the serial work, else from `a` by the serial work.
-    w: Vec<f64>,
+    input: Vec<f64>,
+    working_copy: Vec<f64>,
     x: Vec<f64>,
 }
 
 enum Kind {
-    /// In-place LU without pivoting of a diagonally dominant matrix.
     Lu,
-    /// A dense matrix-vector product.
     Mv,
-    /// `ops` ops.
     Ops(u64),
 }
 
-/// The input of the serial work, written by the pieces in disjoint rows.
 #[derive(Clone, Copy)]
 struct Rows(*mut f64);
 unsafe impl Sync for Rows {}
 unsafe impl Send for Rows {}
 
-/// Rows `i * n / of..(i + 1) * n / of` of `rows` written from `a`, of order
-/// `n`.
-///
-/// # Safety
-/// `rows` holds `n * n` values, and no other thread touches these rows
-/// meanwhile.
 unsafe fn write_rows(rows: Rows, a: &[f64], n: usize, i: usize, of: usize) {
     let (r0, r1) = (i * n / of, (i + 1) * n / of);
+    // SAFETY: the caller passes `rows` of `n * n` values whose rows `r0..r1` no other thread touches meanwhile.
     let dst = unsafe { std::slice::from_raw_parts_mut(rows.0.add(r0 * n), (r1 - r0) * n) };
     dst.copy_from_slice(&a[r0 * n..r1 * n]);
 }
@@ -97,7 +83,7 @@ impl Serial {
             Some(("ops", k)) => (Kind::Ops(k.parse().expect("ops:K")), 1),
             _ => panic!("serial=lu:N, mv:N or ops:K"),
         };
-        let a: Vec<f64> = (0..n * n)
+        let input: Vec<f64> = (0..n * n)
             .map(|k| {
                 let (i, j) = (k / n, k % n);
                 if i == j {
@@ -110,8 +96,8 @@ impl Serial {
         Serial {
             kind,
             n,
-            w: a.clone(),
-            a,
+            working_copy: input.clone(),
+            input,
             x: vec![1.0; n],
         }
     }
@@ -121,9 +107,9 @@ impl Serial {
         match self.kind {
             Kind::Ops(k) => ops(k),
             Kind::Lu => {
-                let w = &mut self.w;
+                let w = &mut self.working_copy;
                 if !fed {
-                    w.copy_from_slice(&self.a);
+                    w.copy_from_slice(&self.input);
                 }
                 for k in 0..n {
                     let (top, rest) = w.split_at_mut((k + 1) * n);
@@ -141,7 +127,7 @@ impl Serial {
             }
             Kind::Mv => {
                 let y: f64 = self
-                    .w
+                    .working_copy
                     .chunks_exact(n)
                     .map(|r| r.iter().zip(&self.x).map(|(a, b)| a * b).sum::<f64>())
                     .sum();
@@ -230,7 +216,6 @@ mod cpu {
     }
 }
 
-/// Where the caller and the workers run (`pin=`).
 #[derive(Clone)]
 struct Pin {
     caller: Option<Vec<usize>>,
@@ -269,6 +254,15 @@ impl Pin {
             cpu::pin(c);
         }
     }
+    fn start_workers_inheriting_affinity<T>(&self, start: impl FnOnce() -> T) -> T {
+        let all = cpu::allowed();
+        self.workers();
+        let started = start();
+        if !all.is_empty() {
+            cpu::pin(&all);
+        }
+        started
+    }
 }
 
 fn quantiles(v: &mut [f64]) -> [f64; 3] {
@@ -305,8 +299,7 @@ fn main() {
     let mut serial = Serial::parse(&serial_s);
     let feed = num("feed", "0") == 1;
 
-    // single-thread references, before any pool runs
-    let reference = |f: &mut dyn FnMut()| {
+    let median_alone = |f: &mut dyn FnMut()| {
         let mut t: Vec<f64> = (0..50)
             .map(|_| {
                 let s = Instant::now();
@@ -316,10 +309,10 @@ fn main() {
             .collect();
         quantiles(&mut t)[0]
     };
-    let serial_ref = reference(&mut || {
+    let serial_alone = median_alone(&mut || {
         serial.run(false);
     });
-    let piece_ref = reference(&mut || {
+    let piece_alone = median_alone(&mut || {
         ops(piece);
     });
 
@@ -352,6 +345,7 @@ fn main() {
         let me = std::thread::current().id();
         let mut last = cpu::current();
         for r in 0..rounds {
+            let warm = r >= rounds / 10;
             let s = Instant::now();
             {
                 let _s = rsprobe::scope!("serial");
@@ -364,9 +358,8 @@ fn main() {
             {
                 let _s = rsprobe::scope!("section");
                 let here = l3s[cpu::current()];
-                let rows = Rows(serial.w.as_mut_ptr());
-                let (a, n) = (&serial.a, serial.n);
-                let warm = r >= rounds / 10;
+                let rows = Rows(serial.working_copy.as_mut_ptr());
+                let (a, n) = (&serial.input, serial.n);
                 let f = |i: usize| {
                     let at = s.elapsed().as_nanos() as u64;
                     if std::thread::current().id() != me {
@@ -379,8 +372,7 @@ fn main() {
                         remote.fetch_add(u64::from(l3s[cpu::current()] != here), Relaxed);
                     }
                     if feed {
-                        // SAFETY: piece i alone writes its rows, the serial
-                        // work runs after the section
+                        // SAFETY: piece i alone writes its rows, and the serial work runs after the section.
                         unsafe { write_rows(rows, a, n, i, pieces) };
                     }
                     ops(piece);
@@ -394,8 +386,7 @@ fn main() {
             }
             let section_s = s.elapsed().as_secs_f64();
             let now = cpu::current();
-            // the first rounds wake the pool
-            if r >= rounds / 10 {
+            if warm {
                 t_serial.push(serial_s);
                 t_section.push(section_s);
                 let f = first.load(Relaxed);
@@ -416,14 +407,10 @@ fn main() {
     let t = Instant::now();
     match runner.as_str() {
         "workers" => {
-            // threads inherit the affinity of the thread that starts them
-            let all = cpu::allowed();
-            pin.workers();
             let pool: Arc<dyn rspool::Pool> =
-                Arc::new(rspool::Workers::with_spin(threads, spin).expect("the worker threads"));
-            if !all.is_empty() {
-                cpu::pin(&all);
-            }
+                Arc::new(pin.start_workers_inheriting_affinity(|| {
+                    rspool::Workers::with_spin(threads, spin).expect("the worker threads")
+                }));
             let _on = ctx.enter();
             rspool::install(pool, &mut body);
         }
@@ -461,11 +448,11 @@ fn main() {
         sm * 1e6,
         s10 * 1e6,
         s90 * 1e6,
-        serial_ref * 1e6,
+        serial_alone * 1e6,
         cm * 1e6,
         c10 * 1e6,
         c90 * 1e6,
-        piece_ref * 1e6,
+        piece_alone * 1e6,
         start * 1e6,
         issue * 1e6,
         100.0 * remote.load(Relaxed) as f64 / pieces_run.load(Relaxed).max(1) as f64,

@@ -13,10 +13,8 @@ use std::hint::spin_loop;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Ops per piece: the work given to the rate.
 const OPS_PER_PIECE: f64 = 1000.0;
 
-/// Busy on this thread for `d`.
 fn busy(d: Duration) {
     let t = Instant::now();
     while t.elapsed() < d {

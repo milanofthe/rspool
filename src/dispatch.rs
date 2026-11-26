@@ -17,11 +17,21 @@ use crate::Piece;
 /// Self::width)).
 #[derive(Clone, Debug)]
 pub struct Dispatch {
-    /// `cost[k]` for `k` threads; `cost[0]` and `cost[1]` are zero.
     cost: Arc<[f64]>,
-    /// The least work any section goes wide with ([`break_even`](
-    /// Self::break_even)).
-    least: f64,
+    break_even: f64,
+}
+
+fn least_work(
+    cost: &[f64],
+    threads: std::ops::RangeInclusive<usize>,
+    serial_share_on: impl Fn(usize) -> f64,
+) -> f64 {
+    threads
+        .filter_map(|k| {
+            let saved = 1.0 - GAIN - serial_share_on(k);
+            (saved > 0.0).then(|| cost[k].max(0.0) / saved)
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 impl Dispatch {
@@ -35,17 +45,11 @@ impl Dispatch {
         for c in cost.iter_mut().take(2) {
             *c = 0.0;
         }
-        // Over many pieces a section on `k` threads takes `work / k +
-        // cost[k]`, which saves `GAIN` of `work` from this work on.
-        let least = (2..cost.len())
-            .filter_map(|k| {
-                let saved = 1.0 - GAIN - 1.0 / k as f64;
-                (saved > 0.0).then(|| cost[k].max(0.0) / saved)
-            })
-            .fold(f64::INFINITY, f64::min);
+        let serial_share_over_many_pieces = |k: usize| 1.0 / k as f64;
+        let break_even = least_work(&cost, 2..=cost.len() - 1, serial_share_over_many_pieces);
         Dispatch {
             cost: cost.into(),
-            least,
+            break_even,
         }
     }
 
@@ -61,7 +65,6 @@ impl Dispatch {
         Dispatch::never_ref().clone()
     }
 
-    /// [`never`](Self::never), borrowed.
     pub(crate) fn never_ref() -> &'static Dispatch {
         static NEVER: std::sync::OnceLock<Dispatch> = std::sync::OnceLock::new();
         NEVER.get_or_init(|| Dispatch::new(vec![0.0; 2]))
@@ -92,19 +95,16 @@ impl Dispatch {
     /// The least work, in ns, with which a section of any number of pieces
     /// goes wide: below it every section runs serially.
     pub fn break_even(&self) -> f64 {
-        self.least
+        self.break_even
     }
 
     /// The least work, in ns, with which a section of `pieces` equal pieces
     /// goes wide (infinite where none does).
     pub fn least(&self, pieces: usize) -> f64 {
         let p = pieces.max(1) as f64;
-        (2..=pieces.min(self.threads()))
-            .filter_map(|k| {
-                let saved = 1.0 - GAIN - pieces.div_ceil(k) as f64 / p;
-                (saved > 0.0).then(|| self.cost[k].max(0.0) / saved)
-            })
-            .fold(f64::INFINITY, f64::min)
+        least_work(&self.cost, 2..=pieces.min(self.threads()), |k| {
+            pieces.div_ceil(k) as f64 / p
+        })
     }
 
     /// The threads a section of `work` ns in `pieces` pieces runs on: the
@@ -117,11 +117,10 @@ impl Dispatch {
     /// [`width`](Self::width) for a section that pays `extra` ns more on
     /// two threads or more (a hand-off into the pool it runs on).
     pub fn width_after(&self, work: f64, pieces: usize, extra: f64) -> usize {
-        if !(work > 0.0) || pieces < 2 || work < self.least {
+        if !(work > 0.0) || pieces < 2 || work < self.break_even {
             return 1;
         }
         if work.is_infinite() {
-            // worth any section: as wide as the pieces and the threads go
             return pieces.min(self.threads());
         }
         let p = pieces as f64;
@@ -196,8 +195,7 @@ impl Dispatch {
             for l in &lines[i * CALIBRATION_LINES..(i + 1) * CALIBRATION_LINES] {
                 l.0.fetch_add(1, Relaxed);
             }
-            // an inert clock (no OS clock) reads zero: no busy wait there
-            while cfg!(not(target_arch = "wasm32")) && t.elapsed() < busy {
+            while !crate::clock::INERT && t.elapsed() < busy {
                 std::hint::spin_loop();
             }
         };
