@@ -50,21 +50,18 @@ impl Place for Rayon {
     }
 
     fn with_dispatch<R>(f: impl FnOnce(&Dispatch) -> R) -> R {
-        let mut f = Some(f);
-        let lent = crate::CURRENT.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(|l| (f.take().expect("called once"))(&l.dispatch))
-        });
-        if let Some(r) = lent {
-            return r;
-        }
-        let f = f.take().expect("not called while lent");
-        let threads = ::rayon::current_num_threads();
-        if threads < 2 {
-            return f(Dispatch::never_ref());
-        }
-        with_rayon(threads, f)
+        crate::CURRENT.with(|c| {
+            let current = c.borrow();
+            if let Some(l) = current.as_ref() {
+                return f(&l.dispatch);
+            }
+            drop(current);
+            let threads = ::rayon::current_num_threads();
+            if threads < 2 {
+                return f(Dispatch::never_ref());
+            }
+            with_rayon(threads, f)
+        })
     }
 
     fn cap() -> usize {

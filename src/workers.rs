@@ -315,12 +315,19 @@ impl TaskJob<'_> {
 impl Workers {
     /// A pool of `threads` threads (the caller one of them), waiting
     /// [`SPIN`] for work before they sleep.
-    pub fn new(threads: usize) -> Self {
+    ///
+    /// # Errors
+    /// The error of [`std::thread::Builder::spawn`] if a worker thread cannot
+    /// be started. The workers started before it are shut down and joined.
+    pub fn new(threads: usize) -> std::io::Result<Self> {
         Self::with_spin(threads, SPIN)
     }
 
     /// [`new`](Self::new) with the workers waiting `spin` for work.
-    pub fn with_spin(threads: usize, spin: std::time::Duration) -> Self {
+    ///
+    /// # Errors
+    /// As [`new`](Self::new).
+    pub fn with_spin(threads: usize, spin: std::time::Duration) -> std::io::Result<Self> {
         let threads = threads.max(1);
         let shared = Arc::new(Shared {
             queues: (0..threads).map(|_| Mutex::new(VecDeque::new())).collect(),
@@ -332,24 +339,22 @@ impl Workers {
             sleep: Mutex::new(()),
             wake: Condvar::new(),
         });
-        let handles = (1..threads)
-            .map(|k| {
-                let sh = shared.clone();
-                std::thread::Builder::new()
-                    .name(format!("rspool-worker-{k}"))
-                    .spawn(move || sh.work(k))
-                    .expect("a worker thread")
-            })
-            .collect();
         let mut w = Workers {
             shared,
             threads,
-            handles,
+            handles: Vec::with_capacity(threads - 1),
             dispatch: Dispatch::never(),
         };
+        for k in 1..threads {
+            let sh = w.shared.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("rspool-worker-{k}"))
+                .spawn(move || sh.work(k))?;
+            w.handles.push(handle);
+        }
         let measured = Dispatch::measure(threads, &|k, piece| w.run_width(k, k, piece));
         w.dispatch = measured;
-        w
+        Ok(w)
     }
 }
 

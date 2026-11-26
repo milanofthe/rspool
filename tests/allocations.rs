@@ -49,7 +49,7 @@ fn deciding_a_section_allocates_nothing() {
     // no pool lent
     assert_eq!(allocs(|| decide(1e3)), 0, "without a pool");
     // a pool lent, small work and work it decides on
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     rspool::install(w, || {
         assert_eq!(allocs(|| decide(1.0)), 0, "small work");
         assert_eq!(allocs(|| decide(1e3)), 0, "decided work");

@@ -10,7 +10,7 @@ use rspool::{Dispatch, Here, Lent, Pool, Work, Workers};
 
 /// `f` with `threads` workers lent at the section cost `dispatch`.
 fn lent(threads: usize, dispatch: Dispatch, f: impl FnOnce()) {
-    let pool: Arc<dyn Pool> = Arc::new(Workers::new(threads));
+    let pool: Arc<dyn Pool> = Arc::new(Workers::new(threads).unwrap());
     rspool::install_lent(Lent { pool, dispatch }, f)
 }
 

@@ -28,7 +28,7 @@ fn a_section_goes_as_wide_as_its_work_is_worth() {
 
 #[test]
 fn workers_measure_what_a_section_costs_them() {
-    let w = Workers::new(4);
+    let w = Workers::new(4).unwrap();
     let d = w.dispatch();
     assert_eq!(d.threads(), 4);
     let costs: Vec<f64> = (2..=4).map(|k| d.cost(k)).collect();
@@ -37,7 +37,7 @@ fn workers_measure_what_a_section_costs_them() {
         "{costs:?}"
     );
     assert!(costs.windows(2).all(|c| c[0] <= c[1]), "{costs:?}");
-    assert_eq!(Workers::new(1).dispatch().width(1e12, 100), 1);
+    assert_eq!(Workers::new(1).unwrap().dispatch().width(1e12, 100), 1);
 }
 
 #[test]
@@ -45,7 +45,7 @@ fn nothing_is_lent_outside_install() {
     assert!(rspool::current().is_none());
     assert_eq!(rspool::threads(), 1);
     assert_eq!(rspool::width(f64::INFINITY, 100), 1);
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(3));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(3).unwrap());
     rspool::install(w, || {
         assert!(rspool::current().is_some());
         assert_eq!(rspool::threads(), 3);
@@ -55,7 +55,7 @@ fn nothing_is_lent_outside_install() {
 
 #[test]
 fn every_piece_runs_once_however_wide() {
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     let lent = Lent {
         dispatch: Dispatch::free(4),
         pool: w,
@@ -73,7 +73,7 @@ fn every_piece_runs_once_however_wide() {
 
 #[test]
 fn a_piece_leaves_its_sections_its_share_of_the_pool() {
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(8));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(8).unwrap());
     let lent = Lent {
         dispatch: Dispatch::free(8),
         pool: w,
@@ -113,7 +113,7 @@ fn a_serial_pool_keeps_everything_on_its_thread() {
 
 #[test]
 fn rated_sections_compute_every_piece_once() {
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     rspool::install(w, || {
         let r = Rate::new(1.0);
         for _ in 0..50 {
@@ -182,7 +182,7 @@ fn a_caller_on_one_thread_enters_a_wider_pool_for_work_worth_it() {
 #[test]
 fn a_section_takes_the_width_its_estimate_is_worth() {
     use rspool::{Go, Work};
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     let lent = Lent {
         dispatch: Dispatch::new((0..=4).map(|k| 1e3 * k as f64).collect()),
         pool: w,
@@ -204,7 +204,7 @@ fn a_section_takes_the_width_its_estimate_is_worth() {
 #[test]
 fn small_work_stays_serial() {
     use rspool::{Go, Work};
-    let w: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let w: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     rspool::install(w.clone(), || {
         let r = Rate::new(1.0);
         // below what any section is worth on these workers

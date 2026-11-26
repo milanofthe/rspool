@@ -122,7 +122,7 @@ fn recorded(f: impl FnOnce()) -> Record {
 
 #[test]
 fn tasks_of_a_run_a_join_and_a_scope_land_under_the_caller() {
-    let w = Workers::new(4);
+    let w = Workers::new(4).unwrap();
     let wide = recorded(|| work(&w));
     let serial = recorded(|| work(&Serial));
     if !on() {
@@ -143,7 +143,7 @@ fn tasks_of_a_run_a_join_and_a_scope_land_under_the_caller() {
 
 #[test]
 fn every_section_counts_its_width_at_the_current_node() {
-    let pool: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let pool: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     let lent = rspool::Lent {
         pool,
         dispatch: rspool::Dispatch::free(4),
@@ -187,7 +187,7 @@ fn kind(r: &Record, path: &[&str], m: &str) -> Option<bool> {
 
 #[test]
 fn a_wide_section_on_workers_records_the_callers_wait() {
-    let pool: Arc<dyn Pool> = Arc::new(Workers::new(4));
+    let pool: Arc<dyn Pool> = Arc::new(Workers::new(4).unwrap());
     let lent = rspool::Lent {
         pool,
         dispatch: rspool::Dispatch::free(4),
@@ -213,9 +213,9 @@ fn a_wide_section_on_workers_records_the_callers_wait() {
 #[test]
 fn without_a_current_context_nothing_is_recorded() {
     let ctx = Context::builder().threshold(Level::DEBUG).build();
-    let w = Workers::new(4);
+    let w = Workers::new(4).unwrap();
     work(&w);
-    rspool::install(Arc::new(Workers::new(4)), || {
+    rspool::install(Arc::new(Workers::new(4).unwrap()), || {
         Here::run_width(16, 4, &|_| ());
         rspool::Work::ns(f64::INFINITY).run::<Here>(16, &|_| ());
     });

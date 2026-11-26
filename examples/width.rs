@@ -53,7 +53,8 @@ fn main() {
     }
     ctx.param("section_us", section_us);
     ctx.param("gap_us", gap_us);
-    let pool: Arc<dyn rspool::Pool> = Arc::new(rspool::Workers::new(threads));
+    let pool: Arc<dyn rspool::Pool> =
+        Arc::new(rspool::Workers::new(threads).expect("the worker threads"));
     let t = Instant::now();
     {
         let _on = ctx.enter();

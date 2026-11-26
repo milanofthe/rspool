@@ -419,7 +419,8 @@ fn main() {
             // threads inherit the affinity of the thread that starts them
             let all = cpu::allowed();
             pin.workers();
-            let pool: Arc<dyn rspool::Pool> = Arc::new(rspool::Workers::with_spin(threads, spin));
+            let pool: Arc<dyn rspool::Pool> =
+                Arc::new(rspool::Workers::with_spin(threads, spin).expect("the worker threads"));
             if !all.is_empty() {
                 cpu::pin(&all);
             }
